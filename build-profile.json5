@@ -1,0 +1,52 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "material": {
+          "certpath": "C:/Users/Cheng/.ohos/config/openharmony/default_NDKcamera_dEsxulObtpihfI4K1_d4IR6uNjKZNl4HNcSIBf31SPY=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B14155D85AD5BBE6FFB338AAADD2FCAFBD51291A784779466D206983C2441A1DB7326E16BC7BA97",
+          "profile": "C:/Users/Cheng/.ohos/config/openharmony/default_NDKcamera_dEsxulObtpihfI4K1_d4IR6uNjKZNl4HNcSIBf31SPY=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:/Users/Cheng/.ohos/config/openharmony/default_NDKcamera_dEsxulObtpihfI4K1_d4IR6uNjKZNl4HNcSIBf31SPY=.p12",
+          "storePassword": "0000001B6AB7475AD6F8431D33C1C13430C53756EB1881995D1F911714A571214A7B33AA64020F9FD10502"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        //        "compatibleSdkVersion": "5.0.0(12)",
+        //        "runtimeOS": "HarmonyOS"
+        "compatibleSdkVersion": 18,
+        "compileSdkVersion": 18,
+        "targetSdkVersion": 18,
+        "runtimeOS": "OpenHarmony"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
