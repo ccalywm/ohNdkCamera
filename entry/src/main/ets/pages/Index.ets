@@ -71,6 +71,8 @@ struct Index {
             this.surfaceId = this.xComponentController.getXComponentSurfaceId();
             console.log("我是surfaceID：",this.surfaceId);
             testNapi.initCamera(this.surfaceId, 2, 0)
+
+
           })
           .height('80%').width("60%")
         Button() {
