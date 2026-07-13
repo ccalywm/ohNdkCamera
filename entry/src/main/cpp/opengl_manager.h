@@ -64,6 +64,20 @@ public:
      */
     bool IsRunning() const;
 
+    /**
+     * 设置画面旋转角度（以度为单位，仅支持 0, 90, 180, 270）
+     */
+    void SetRotation(int degrees);
+
+    /**
+     * 设置水平翻转（镜像）
+     */
+    void SetFlipHorizontal(bool enable);
+
+    /**
+     * 设置垂直翻转（上下颠倒）
+     */
+    void SetFlipVertical(bool enable);
 private:
     OpenGLManager();
     ~OpenGLManager();
@@ -128,6 +142,11 @@ private:
     std::atomic<bool> sizeChanged_{false};
     mutable std::mutex mutex_;
 
+    // 用户变换控制
+    std::atomic<float> rotationDeg_{0.0f};   // 0, 90, 180, 270
+    std::atomic<bool>  flipH_{false};
+    std::atomic<bool>  flipV_{false};
+    
     // 帧计时
     float startTime_ = 0.0f;
     std::atomic<int32_t> frameCount_{0};
