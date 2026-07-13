@@ -6,6 +6,7 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <condition_variable> // 需要包含此头文件
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -78,6 +79,11 @@ public:
      * 设置垂直翻转（上下颠倒）
      */
     void SetFlipVertical(bool enable);
+
+
+   // 帧回调处理
+    void OnFrameAvailableCallback();
+  
 private:
     OpenGLManager();
     ~OpenGLManager();
@@ -142,6 +148,13 @@ private:
     std::atomic<bool> sizeChanged_{false};
     mutable std::mutex mutex_;
 
+
+    // 在 private 区域添加：
+    std::mutex frameMutex_;                       // 配合条件变量的互斥锁
+    std::condition_variable frameCond_;           // 用于等待新帧的条件变量
+    std::atomic<bool> frameAvailable_{false};     // 标记是否有新帧可用
+    
+    
     // 用户变换控制
     std::atomic<float> rotationDeg_{0.0f};   // 0, 90, 180, 270
     std::atomic<bool>  flipH_{false};

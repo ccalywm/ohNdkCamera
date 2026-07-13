@@ -4,6 +4,18 @@
 #include <cmath>
 #include <chrono>
 #include <unistd.h>
+
+// 全局帧可用回调函数
+static void OnFrameAvailable(void* context) {
+    auto* manager = static_cast<OpenGLManager*>(context);
+    if (manager) {
+        manager->OnFrameAvailableCallback(); // 调用成员函数处理
+    }
+}
+void OpenGLManager::OnFrameAvailableCallback() {
+    frameAvailable_.store(true);
+    frameCond_.notify_one();
+}
 /**
  * 构建用户变换矩阵（以图像中心为轴，旋转 + 翻转）
  * @param angleDeg  旋转角度（0, 90, 180, 270）
@@ -229,6 +241,8 @@ void OpenGLManager::Stop() {
     // 通知渲染线程退出
     if (running_.load()) {
         running_.store(false);
+        // 唤醒可能阻塞在条件变量上的渲染线程
+        frameCond_.notify_all();
         if (renderThread_.joinable()) {
             renderThread_.join();
         }
@@ -282,14 +296,13 @@ bool OpenGLManager::CreateNativeImage() {
     }
 
     // ---- 2. 创建 NativeImage，绑定 OES 纹理 ----
-    // 参数：textureId = OES 纹理 ID, textureTarget = GL_TEXTURE_EXTERNAL_OES
     nativeImage_ = OH_NativeImage_Create(oesTextureId_, GL_TEXTURE_EXTERNAL_OES);
     if (nativeImage_ == nullptr) {
         LOGE("OH_NativeImage_Create 失败");
         return false;
     }
 
-    // ---- 3. 附加到当前 GL 上下文（UpdateSurfaceImage 需要此步骤） ----
+    // ---- 3. 附加到当前 GL 上下文 ----
     int ret = OH_NativeImage_AttachContext(nativeImage_, oesTextureId_);
     if (ret != 0) {
         LOGE("OH_NativeImage_AttachContext 失败, ret=%d", ret);
@@ -298,8 +311,7 @@ bool OpenGLManager::CreateNativeImage() {
         return false;
     }
 
-    // ---- 4. 获取生产者端 NativeWindow（摄像头将写入此窗口） ----
-    // 注意：NativeWindow 在 OH_NativeImage_Destroy 时自动释放，不要手动 Destroy
+    // ---- 4. 获取生产者端 NativeWindow ----
     cameraInputWindow_ = OH_NativeImage_AcquireNativeWindow(nativeImage_);
     if (cameraInputWindow_ == nullptr) {
         LOGE("OH_NativeImage_AcquireNativeWindow 失败");
@@ -309,7 +321,7 @@ bool OpenGLManager::CreateNativeImage() {
         return false;
     }
 
-    // ---- 5. 获取 Surface ID（注意：双参数，写入 uint64_t*） ----
+    // ---- 5. 获取 Surface ID ----
     uint64_t surfaceId = 0;
     ret = OH_NativeImage_GetSurfaceId(nativeImage_, &surfaceId);
     if (ret != 0) {
@@ -319,8 +331,22 @@ bool OpenGLManager::CreateNativeImage() {
         nativeImage_ = nullptr;
         return false;
     }
-
     inputSurfaceId_ = std::to_string(surfaceId);
+
+    // ---- 6. 注册帧可用监听器 ----
+    OH_OnFrameAvailableListener listener;
+    listener.context = this;
+    listener.onFrameAvailable = OnFrameAvailable;
+    ret = OH_NativeImage_SetOnFrameAvailableListener(nativeImage_, listener);
+    if (ret != 0) {
+        LOGE("OH_NativeImage_SetOnFrameAvailableListener 失败, ret=%d", ret);
+        // 注册失败则释放资源并返回 false，因为后续循环依赖回调唤醒
+        OH_NativeImage_DetachContext(nativeImage_);
+        OH_NativeImage_Destroy(&nativeImage_);
+        nativeImage_ = nullptr;
+        return false;
+    }
+
     LOGI("NativeImage 创建成功, 摄像头输入 Surface ID=%s, OES 纹理=%u",
          inputSurfaceId_.c_str(), oesTextureId_);
     return true;
@@ -598,6 +624,48 @@ void OpenGLManager::DestroyGLResources() {
  * 渲染线程主函数
  * 循环：获取最新帧 → 更新纹理 → Shader 处理 → 渲染到 XComponent
  */
+// void OpenGLManager::RenderLoop() {
+//     LOGI("渲染线程启动");
+//
+//     // ---- 绑定 EGL 上下文到当前线程 ----
+//     if (!eglMakeCurrent(eglDisplay_, eglSurface_, eglSurface_, eglContext_)) {
+//         LOGE("渲染线程绑定 EGL 上下文失败: 0x%x", eglGetError());
+//         return;
+//     }
+//
+//     auto startTp = std::chrono::steady_clock::now();
+//
+//     while (running_.load()) {
+//         startTime_ = std::chrono::duration<float>(
+//             std::chrono::steady_clock::now() - startTp).count();
+//
+//         if (sizeChanged_.load()) {
+//             sizeChanged_.store(false);
+//             if (xComponentWindow_ != nullptr) {
+//                 OH_NativeWindow_NativeWindowHandleOpt(
+//                     xComponentWindow_, SET_BUFFER_GEOMETRY, surfaceWidth_, surfaceHeight_);
+//             }
+//             if (fbo_)        { glDeleteFramebuffers(1, &fbo_);        fbo_ = 0; }
+//             if (fboTexture_) { glDeleteTextures(1, &fboTexture_);     fboTexture_ = 0; }
+//             CreateFBO();
+//         }
+//
+//         if (!RenderFrame()) {
+//             // 没有新帧，适当休眠避免忙等（可保留或增加延迟）
+//             std::this_thread::sleep_for(std::chrono::milliseconds(5));
+//             // 如需调试可打印（建议仅打印一次，避免刷屏）
+//     // LOGI("没有新帧, 适当休眠避免忙等 %d 帧", frameCount_.load());
+//            
+//         }
+//         // 若需统计成功帧数，可在 RenderFrame 内部打印或此处加计数器
+//     }
+//
+//     // 释放上下文（可选）
+//     eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+//
+//     LOGI("渲染线程退出, 共渲染 %d 帧", frameCount_.load());
+// }
+
 void OpenGLManager::RenderLoop() {
     LOGI("渲染线程启动");
 
@@ -610,9 +678,23 @@ void OpenGLManager::RenderLoop() {
     auto startTp = std::chrono::steady_clock::now();
 
     while (running_.load()) {
-        startTime_ = std::chrono::duration<float>(
-            std::chrono::steady_clock::now() - startTp).count();
+        // 1. 等待新帧信号或线程退出指令
+        {
+            std::unique_lock<std::mutex> lock(frameMutex_);
+            frameCond_.wait(lock, [this] {
+                return frameAvailable_.load() || !running_.load();
+            });
+        }
 
+        // 若线程被要求停止，则退出循环
+        if (!running_.load()) {
+            break;
+        }
+
+        // 2. 重置帧可用标志
+        frameAvailable_.store(false);
+
+        // 3. 处理窗口尺寸变化
         if (sizeChanged_.load()) {
             sizeChanged_.store(false);
             if (xComponentWindow_ != nullptr) {
@@ -624,19 +706,15 @@ void OpenGLManager::RenderLoop() {
             CreateFBO();
         }
 
+        // 4. 渲染一帧
         if (!RenderFrame()) {
-            // 没有新帧，适当休眠避免忙等（可保留或增加延迟）
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            // 如需调试可打印（建议仅打印一次，避免刷屏）
-    // LOGI("没有新帧, 适当休眠避免忙等 %d 帧", frameCount_.load());
-            
+            // 极少数情况渲染失败（如资源异常），短暂休眠避免死循环
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        // 若需统计成功帧数，可在 RenderFrame 内部打印或此处加计数器
     }
 
     // 释放上下文（可选）
     eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-
     LOGI("渲染线程退出, 共渲染 %d 帧", frameCount_.load());
 }
 
