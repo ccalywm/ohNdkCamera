@@ -17,7 +17,7 @@ namespace OHOS_CAMERA_SAMPLE {
 class NDKCamera {
 public:
     ~NDKCamera();
-    NDKCamera(char *str, uint32_t focusMode, uint32_t cameraDeviceIndex);
+    NDKCamera(const std::string& str, uint32_t focusMode, uint32_t cameraDeviceIndex);
 
     static void Destroy()
     {
@@ -108,7 +108,7 @@ private:
     bool *isCameraMuted_;
     Camera_Position position_;
     Camera_Type type_;
-    char *previewSurfaceId_;
+    std::string previewSurfaceId_;
     char *photoSurfaceId_;
     Camera_ErrorCode ret_;
     uint32_t takePictureTimes = 0;

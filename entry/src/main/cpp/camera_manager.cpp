@@ -1,13 +1,15 @@
 #include "camera_manager.h"
 
-#include "opengl_manager.h"
+// #include "opengl_manager.h"
+// #include "opengl/OpenGLManager.h"
+
 #include "util/DebugLog.h"
 
 namespace OHOS_CAMERA_SAMPLE {
 NDKCamera *NDKCamera::ndkCamera_ = nullptr;
 std::mutex NDKCamera::mtx_;
 
-NDKCamera::NDKCamera(char *str, uint32_t focusMode, uint32_t cameraDeviceIndex)
+NDKCamera::NDKCamera(const std::string& str, uint32_t focusMode, uint32_t cameraDeviceIndex)
     : previewSurfaceId_(str),
       cameras_(nullptr),
       focusMode_(focusMode),
@@ -31,14 +33,15 @@ NDKCamera::NDKCamera(char *str, uint32_t focusMode, uint32_t cameraDeviceIndex)
       step_(0),
       ret_(CAMERA_OK)
 {
-    // 获取 OpenGLManager 提供的输入 Surface ID
-    std::string inputSurfaceId = OpenGLManager::GetInstance().GetInputSurfaceId();
-    if (inputSurfaceId.empty()) {
-        LOGE( "OpenGLManager not ready, camera init failed");
-        return;
-    }
-    // 将 previewSurfaceId_ 设为该 ID
-    previewSurfaceId_ = strdup(inputSurfaceId.c_str());
+    // // 获取 OpenGLManager 提供的输入 Surface ID
+    // std::string inputSurfaceId = OpenGLManager::GetInstance().GetInputSurfaceId();
+    // if (inputSurfaceId.empty()) {
+    //     LOGE( "OpenGLManager not ready, camera init failed");
+    //     return;
+    // }
+    // // 将 previewSurfaceId_ 设为该 ID
+    // previewSurfaceId_ = strdup(inputSurfaceId.c_str());
+    // previewSurfaceId_ = strdup(inputSurfaceId.c_str());
     valid_ = false;
     ReleaseCamera();
     Camera_ErrorCode ret = OH_Camera_GetCameraManager(&cameraManager_);  // 创建manager对象
@@ -400,8 +403,8 @@ Camera_ErrorCode NDKCamera::CreatePreviewOutput(void)
         LOGE( "Get previewProfiles failed.");
         return CAMERA_INVALID_ARGUMENT;
     }
-    ret_ = OH_CameraManager_CreatePreviewOutput(cameraManager_, profile_, previewSurfaceId_, &previewOutput_);
-    if (previewSurfaceId_ == nullptr || previewOutput_ == nullptr || ret_ != CAMERA_OK) {
+    ret_ = OH_CameraManager_CreatePreviewOutput(cameraManager_, profile_, previewSurfaceId_.c_str(), &previewOutput_);
+    if (previewSurfaceId_.empty() || previewOutput_ == nullptr || ret_ != CAMERA_OK) {
         LOGE( "CreatePreviewOutput failed.");
         return CAMERA_INVALID_ARGUMENT;
     }

@@ -74,7 +74,7 @@ struct Index {
 
 
           })
-          .height('80%').width("60%")
+          .height('90%').width("70%")
         Button() {
           Text("拍照")
             .fontColor(Color.Black)

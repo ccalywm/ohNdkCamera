@@ -1,6 +1,7 @@
 #include <js_native_api.h>
 #include "camera_manager.h"
-#include "opengl_manager.h"
+// #include "opengl_manager.h"
+#include "opengl/OpenGLManager.h"
 
 #include "util/DebugLog.h"
 
@@ -85,55 +86,149 @@ static napi_value IsVideoStabilizationModeSupported(napi_env env, napi_callback_
     return result;
 }
 
+// static napi_value InitCamera(napi_env env, napi_callback_info info)
+// {
+//     LOGE( "InitCamera Start");
+//     size_t requireArgc = 3;
+//     size_t argc = 3;
+//     napi_value args[3] = {nullptr};
+//     napi_value result;
+//     size_t typeLen = 0;
+//     char* surfaceId = nullptr;
+//
+//     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+//
+//     napi_get_value_string_utf8(env, args[0], nullptr, 0, &typeLen);
+//     surfaceId = new char[typeLen + 1];
+//     napi_get_value_string_utf8(env, args[0], surfaceId, typeLen + 1, &typeLen);
+//
+//     napi_valuetype valuetype1;
+//     napi_typeof(env, args[1], &valuetype1);
+//
+//     int32_t focusMode;
+//     napi_get_value_int32(env, args[1], &focusMode);
+//
+//     uint32_t cameraDeviceIndex;
+//     napi_get_value_uint32(env, args[ARGS_TWO], &cameraDeviceIndex);
+//
+//     LOGE( "InitCamera focusMode : %{public}d", focusMode);
+//     LOGE( "InitCamera surfaceId : %{public}s", surfaceId);
+//     LOGE( "InitCamera cameraDeviceIndex : %{public}d", cameraDeviceIndex);
+//
+//     if (ndkCamera_) {
+//         LOGE( "ndkCamera_ is not null");
+//         delete ndkCamera_;
+//         ndkCamera_ = nullptr;
+//     }
+//
+//     // 先启动 OpenGL 管线，将 XComponent 的 surfaceId 作为渲染目标
+//     // 默认分辨率 640x480，后续可通过 UpdateSize 动态调整
+//     int32_t renderWidth = 640;
+//     int32_t renderHeight = 480;
+//     bool glStarted = OpenGLManager::GetInstance().Start(std::string(surfaceId), renderWidth, renderHeight);
+//     if (!glStarted) {
+//         LOGE("OpenGLManager 启动失败");
+//     }
+//
+//     // NDKCamera 构造函数内部会从 OpenGLManager 获取输入 Surface ID
+//     // 摄像头数据将写入 OpenGLManager 创建的 Surface
+//     ndkCamera_ = new NDKCamera(surfaceId, focusMode, cameraDeviceIndex);
+//     LOGE( "InitCamera End");
+//     napi_create_int32(env, argc, &result);
+//     return result;
+// }
+
+
 static napi_value InitCamera(napi_env env, napi_callback_info info)
 {
-    LOGE( "InitCamera Start");
-    size_t requireArgc = 3;
+    LOGE("InitCamera Start");
     size_t argc = 3;
     napi_value args[3] = {nullptr};
     napi_value result;
-    size_t typeLen = 0;
-    char* surfaceId = nullptr;
-
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
+    // 1. 获取 surfaceId
+    size_t typeLen = 0;
     napi_get_value_string_utf8(env, args[0], nullptr, 0, &typeLen);
-    surfaceId = new char[typeLen + 1];
+    char* surfaceId = new char[typeLen + 1];
     napi_get_value_string_utf8(env, args[0], surfaceId, typeLen + 1, &typeLen);
-
-    napi_valuetype valuetype1;
-    napi_typeof(env, args[1], &valuetype1);
 
     int32_t focusMode;
     napi_get_value_int32(env, args[1], &focusMode);
 
     uint32_t cameraDeviceIndex;
-    napi_get_value_uint32(env, args[ARGS_TWO], &cameraDeviceIndex);
+    napi_get_value_uint32(env, args[2], &cameraDeviceIndex);
 
-    LOGE( "InitCamera focusMode : %{public}d", focusMode);
-    LOGE( "InitCamera surfaceId : %{public}s", surfaceId);
-    LOGE( "InitCamera cameraDeviceIndex : %{public}d", cameraDeviceIndex);
+    LOGE("InitCamera focusMode : %d", focusMode);
+    LOGE("InitCamera surfaceId : %s", surfaceId);
+    LOGE("InitCamera cameraDeviceIndex : %d", cameraDeviceIndex);
 
     if (ndkCamera_) {
-        LOGE( "ndkCamera_ is not null");
         delete ndkCamera_;
         ndkCamera_ = nullptr;
     }
 
-    // 先启动 OpenGL 管线，将 XComponent 的 surfaceId 作为渲染目标
-    // 默认分辨率 640x480，后续可通过 UpdateSize 动态调整
-    int32_t renderWidth = 640;
-    int32_t renderHeight = 480;
-    bool glStarted = OpenGLManager::GetInstance().Start(std::string(surfaceId), renderWidth, renderHeight);
-    if (!glStarted) {
-        LOGE("OpenGLManager 启动失败");
+    // 2. 创建输出 NativeWindow（XComponent 的 Surface）
+    uint64_t surfId = std::stoull(surfaceId);
+    OHNativeWindow* outputWindow = nullptr;
+    int ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfId, &outputWindow);
+    if (ret != 0 || outputWindow == nullptr) {
+        LOGE("创建输出 NativeWindow 失败, ret=%d", ret);
+        delete[] surfaceId;
+        napi_create_int32(env, -1, &result);
+        return result;
     }
 
-    // NDKCamera 构造函数内部会从 OpenGLManager 获取输入 Surface ID
-    // 摄像头数据将写入 OpenGLManager 创建的 Surface
-    ndkCamera_ = new NDKCamera(surfaceId, focusMode, cameraDeviceIndex);
-    LOGE( "InitCamera End");
-    napi_create_int32(env, argc, &result);
+    int32_t renderWidth = 640;
+    int32_t renderHeight = 480;
+    OH_NativeWindow_NativeWindowHandleOpt(outputWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
+
+    // 3. 初始化 OpenGLManager
+    auto& glManager = OpenGLManager::GetInstance();
+    if (!glManager.Initialize(renderWidth, renderHeight)) {
+        LOGE("OpenGLManager 初始化失败");
+        OH_NativeWindow_DestroyNativeWindow(outputWindow);
+        delete[] surfaceId;
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    if (!glManager.Start()) {
+        LOGE("OpenGLManager 启动失败");
+        glManager.Stop();
+        OH_NativeWindow_DestroyNativeWindow(outputWindow);
+        delete[] surfaceId;
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    // 4. 添加输出目标（XComponent）
+    glManager.AddOutput(outputWindow, renderWidth, renderHeight);
+
+    // 5. 获取摄像头输入 Surface ID（OpenGLManager 内部已创建 NativeImage）
+    std::string inputSurfaceId = glManager.GetInputSurfaceId();
+    if (inputSurfaceId.empty()) {
+        LOGE("获取输入 Surface ID 失败");
+        glManager.Stop();
+        OH_NativeWindow_DestroyNativeWindow(outputWindow);
+        delete[] surfaceId;
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    LOGE("摄像头输入 Surface ID: %s", inputSurfaceId.c_str());
+
+    // 6. 创建 NDKCamera，传入输入 Surface ID
+    ndkCamera_ = new NDKCamera(inputSurfaceId.c_str(), focusMode, cameraDeviceIndex);
+
+    // 7. 保存 outputWindow 以便后续释放（例如在 ReleaseCamera 中）
+    // 建议将 outputWindow 保存到全局或类静态变量中，这里简单演示：
+    static OHNativeWindow* s_outputWindow = nullptr;
+    s_outputWindow = outputWindow;  // 注意：实际项目中应该用更安全的方式管理
+
+    LOGE("InitCamera End");
+    delete[] surfaceId;
+    napi_create_int32(env, 0, &result);
     return result;
 }
 
