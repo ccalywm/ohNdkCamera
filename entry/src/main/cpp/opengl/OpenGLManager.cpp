@@ -284,61 +284,144 @@ void OpenGLManager::RenderLoop() {
         }
         hasTexMatrix_ = true;
 
-        // ---- 读取变换参数 ----
         int rot = rotationDeg_.load();
         bool fh = flipH_.load();
         bool fv = flipV_.load();
-        bool userSet = userSetTransform_.load();
-
-        // 如果用户没有主动设置，且旋转为0，默认应用180度修正画面颠倒
-        // 这样即使 setTransform 未调用，画面也是正的
-        if (!userSet && rot == 0) {
-            rot = 180;
-        //     LOGI("RenderLoop: applying default 180-degree rotation (user not set)");
-        // } else {
-        //     LOGI("RenderLoop: rotation=%d, flipH=%d, flipV=%d, userSet=%d", rot, fh, fv, userSet);
-        }
-
-        // 应用变换到渲染器
         renderer_->setTransform(rot, fh, fv);
 
-        // 绘制输出
         std::lock_guard<std::mutex> lock(outputsMutex_);
-        if (outputs_.empty()) continue;
+        if (outputs_.empty()) {
+            LOGI("RenderLoop: no outputs");
+            continue;
+        }
 
         for (auto& pair : outputs_) {
             OutputInfo& info = pair.second;
             if (info.surface == EGL_NO_SURFACE) {
                 info.surface = eglHelper_->createWindowSurface(pair.first);
                 if (info.surface == EGL_NO_SURFACE) {
-                    LOGE("Recreate surface failed");
+                    LOGE("Recreate surface failed for window %p", pair.first);
                     continue;
                 }
             }
             if (!eglHelper_->makeCurrent(info.surface)) {
-                LOGE("makeCurrent failed");
+                LOGE("makeCurrent failed for surface %p", info.surface);
                 continue;
             }
+            LOGI("Drawing to surface %p, size %dx%d", info.surface, info.width, info.height);
             renderer_->draw(info.width, info.height, texMatrix_);
             if (!eglHelper_->swapBuffers(info.surface)) {
-                LOGE("swapBuffers failed");
+                LOGE("swapBuffers failed for surface %p", info.surface);
             }
         }
         eglHelper_->makeCurrent(EGL_NO_SURFACE);
     }
 
-    // 清理
-    {
-        std::lock_guard<std::mutex> lock(outputsMutex_);
-        for (auto& pair : outputs_) {
-            if (pair.second.surface != EGL_NO_SURFACE) {
-                eglHelper_->destroySurface(pair.second.surface);
-            }
-        }
-        outputs_.clear();
-    }
+    // 清理...
     LOGI("RenderLoop exited");
 }
+// void OpenGLManager::RenderLoop() {
+//     LOGI("RenderLoop started");
+//
+//     if (!eglHelper_->makeCurrent(EGL_NO_SURFACE)) {
+//         LOGE("RenderLoop: makeCurrent failed, cannot continue");
+//         return;
+//     }
+//     LOGI("RenderLoop: EGL context bound");
+//
+//     frameCount_.store(0);
+//
+//     while (running_.load()) {
+//         bool hasFrame = false;
+//         {
+//             std::unique_lock<std::mutex> lock(frameMutex_);
+//             frameCond_.wait(lock, [this] {
+//                 return frameCount_.load() > 0 || !running_.load() || !taskQueue_.empty();
+//             });
+//             if (!running_.load()) break;
+//             if (frameCount_.load() > 0) {
+//                 frameCount_.fetch_sub(1);
+//                 hasFrame = true;
+//             }
+//         }
+//
+//         if (!running_.load()) break;
+//         ProcessTasks();
+//
+//         if (!hasFrame) {
+//             continue;
+//         }
+//
+//         // 更新纹理
+//         int ret = OH_NativeImage_UpdateSurfaceImage(nativeImage_);
+//         if (ret != 0) {
+//             LOGE("UpdateSurfaceImage failed, ret=%d", ret);
+//             continue;
+//         }
+//
+//         ret = OH_NativeImage_GetTransformMatrixV2(nativeImage_, texMatrix_);
+//         if (ret != 0) {
+//             memset(texMatrix_, 0, sizeof(texMatrix_));
+//             texMatrix_[0] = texMatrix_[5] = texMatrix_[10] = texMatrix_[15] = 1.0f;
+//             LOGE("GetTransformMatrixV2 failed, using identity");
+//         }
+//         hasTexMatrix_ = true;
+//
+//         // ---- 读取变换参数 ----
+//         int rot = rotationDeg_.load();
+//         bool fh = flipH_.load();
+//         bool fv = flipV_.load();
+//         bool userSet = userSetTransform_.load();
+//
+//         // 如果用户没有主动设置，且旋转为0，默认应用180度修正画面颠倒
+//         // 这样即使 setTransform 未调用，画面也是正的
+//         if (!userSet && rot == 0) {
+//             rot = 180;
+//         //     LOGI("RenderLoop: applying default 180-degree rotation (user not set)");
+//         // } else {
+//         //     LOGI("RenderLoop: rotation=%d, flipH=%d, flipV=%d, userSet=%d", rot, fh, fv, userSet);
+//         }
+//
+//         // 应用变换到渲染器
+//         renderer_->setTransform(rot, fh, fv);
+//
+//         // 绘制输出
+//         std::lock_guard<std::mutex> lock(outputsMutex_);
+//         if (outputs_.empty()) continue;
+//
+//         for (auto& pair : outputs_) {
+//             OutputInfo& info = pair.second;
+//             if (info.surface == EGL_NO_SURFACE) {
+//                 info.surface = eglHelper_->createWindowSurface(pair.first);
+//                 if (info.surface == EGL_NO_SURFACE) {
+//                     LOGE("Recreate surface failed");
+//                     continue;
+//                 }
+//             }
+//             if (!eglHelper_->makeCurrent(info.surface)) {
+//                 LOGE("makeCurrent failed");
+//                 continue;
+//             }
+//             renderer_->draw(info.width, info.height, texMatrix_);
+//             if (!eglHelper_->swapBuffers(info.surface)) {
+//                 LOGE("swapBuffers failed");
+//             }
+//         }
+//         eglHelper_->makeCurrent(EGL_NO_SURFACE);
+//     }
+//
+//     // 清理
+//     {
+//         std::lock_guard<std::mutex> lock(outputsMutex_);
+//         for (auto& pair : outputs_) {
+//             if (pair.second.surface != EGL_NO_SURFACE) {
+//                 eglHelper_->destroySurface(pair.second.surface);
+//             }
+//         }
+//         outputs_.clear();
+//     }
+//     LOGI("RenderLoop exited");
+// }
 
 void OpenGLManager::ProcessTasks() {
     std::queue<std::function<void()>> tasks;

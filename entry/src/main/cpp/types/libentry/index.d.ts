@@ -1,5 +1,7 @@
 export const initCamera: (surfaceId: string, focusMode: number, cameraDeviceIndex: number) => number;
 
+export const startEncodeDecode: (surfaceId: string) => number;
+
 export const startPhotoOrVideo: (modeFlag: string, videoId: string, photoId: string) => number;
 
 export const videoOutputStart: () => number;

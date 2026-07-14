@@ -2,12 +2,182 @@
 #include "camera_manager.h"
 // #include "opengl_manager.h"
 #include "opengl/OpenGLManager.h"
-
+#include "video_codec.h"          // 新增：编解码器头文件
 #include "util/DebugLog.h"
-
+#include <multimedia/image_framework/image/pixelmap_native.h>
+#include <native_buffer/native_buffer.h>   // 提供 BUFFER_USAGE_* 宏
+#include <native_window/external_window.h>
+#include <unistd.h>
 using namespace OHOS_CAMERA_SAMPLE;
 static NDKCamera *ndkCamera_ = nullptr;
 const int32_t ARGS_TWO = 2;
+
+// ---------- 新增：编解码器全局变量 ----------
+static VideoEncoder* g_videoEncoder = nullptr;
+static VideoDecoder* g_videoDecoder = nullptr;
+static std::shared_ptr<EncodedDataQueue> g_encodeQueue = nullptr;
+static std::thread g_decoderThread;
+static std::atomic<bool> g_decoderRunning{false};
+static OHNativeWindow* g_decoderOutputWindow = nullptr;
+
+// ---------- 新增：解码线程函数 ----------
+static void DecoderLoop() {
+    LOGI("DecoderLoop started");
+    int count = 0;
+    while (g_decoderRunning.load()) {
+        auto packet = g_encodeQueue->Pop(50);
+        if (!packet) continue;
+        if (!g_videoDecoder || !g_videoDecoder->IsRunning()) continue;
+
+        count++;
+        LOGI("DL: #%d sz=%zu key=%d cfg=%d",
+             count, packet->data.size(), packet->isKeyFrame, packet->isCodecConfig);
+
+        g_videoDecoder->QueuePacket(
+            packet->data.data(), packet->data.size(),
+            packet->pts, packet->isKeyFrame, packet->isCodecConfig);
+    }
+    LOGI("DecoderLoop exit, total=%d", count);
+}
+
+// ---------- 新增：启动编解码链路（由 ArkTS 调用） ----------
+static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
+    napi_value result = nullptr;
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    if (argc < 1) {
+        LOGE("StartEncodeDecode requires decoder surfaceId");
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    size_t typeLen = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &typeLen);
+    if (typeLen == 0) {
+        LOGE("StartEncodeDecode: empty surfaceId");
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+    char* decoderSurfaceId = new char[typeLen + 1];
+    napi_get_value_string_utf8(env, args[0], decoderSurfaceId, typeLen + 1, &typeLen);
+
+    uint64_t surfId = std::stoull(decoderSurfaceId);
+    OHNativeWindow* decoderWindow = nullptr;
+    int ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfId, &decoderWindow);
+    delete[] decoderSurfaceId;
+
+    // 重试机制
+    int retryCount = 0;
+    while ((ret != 0 || decoderWindow == nullptr) && retryCount < 5) {
+        LOGE("StartEncodeDecode: create decoder window failed, ret=%d, retry %d", ret, retryCount);
+        usleep(200000);
+        ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfId, &decoderWindow);
+        retryCount++;
+    }
+
+    if (ret != 0 || decoderWindow == nullptr) {
+        LOGE("StartEncodeDecode: failed to create decoder NativeWindow after retries");
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    auto& glManager = OpenGLManager::GetInstance();
+    int32_t renderWidth = 640;
+    int32_t renderHeight = 480;
+
+    // 设置解码输出窗口尺寸
+    OH_NativeWindow_NativeWindowHandleOpt(decoderWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
+
+    // 1. 清理旧编码器
+    if (g_videoEncoder) {
+        OHNativeWindow* oldEncoderWindow = g_videoEncoder->GetInputSurface();
+        if (oldEncoderWindow) {
+            glManager.RemoveOutput(oldEncoderWindow);
+        }
+        g_videoEncoder->Stop();
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+    }
+
+    // 2. 创建并启动编码器
+    g_videoEncoder = new VideoEncoder();
+    if (!g_videoEncoder->Init(renderWidth, renderHeight, 2000, 30, "video/avc")) {
+        LOGE("VideoEncoder Init failed");
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+        OH_NativeWindow_DestroyNativeWindow(decoderWindow);
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+    if (!g_videoEncoder->Start()) {
+        LOGE("VideoEncoder Start failed");
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+        OH_NativeWindow_DestroyNativeWindow(decoderWindow);
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    // 3. 将编码器输入 Surface 添加到 OpenGL 输出
+    OHNativeWindow* encoderWindow = g_videoEncoder->GetInputSurface();
+    if (!encoderWindow) {
+        LOGE("GetInputSurface failed");
+        g_videoEncoder->Stop();
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+        OH_NativeWindow_DestroyNativeWindow(decoderWindow);
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+    OH_NativeWindow_NativeWindowHandleOpt(encoderWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
+    glManager.AddOutput(encoderWindow, renderWidth, renderHeight);
+
+    g_encodeQueue = g_videoEncoder->GetOutputQueue();
+
+    // 4. 等待编码器产出第一批数据
+    usleep(200000);
+
+    // 5. 创建并启动解码器
+    g_decoderOutputWindow = decoderWindow;
+    g_videoDecoder = new VideoDecoder();
+    if (!g_videoDecoder->Init(decoderWindow, "video/avc", renderWidth, renderHeight)) {
+        LOGE("VideoDecoder Init failed");
+        glManager.RemoveOutput(encoderWindow);
+        g_videoEncoder->Stop();
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+        delete g_videoDecoder;
+        g_videoDecoder = nullptr;
+        OH_NativeWindow_DestroyNativeWindow(decoderWindow);
+        g_decoderOutputWindow = nullptr;
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+    if (!g_videoDecoder->Start()) {
+        LOGE("VideoDecoder Start failed");
+        glManager.RemoveOutput(encoderWindow);
+        g_videoEncoder->Stop();
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+        delete g_videoDecoder;
+        g_videoDecoder = nullptr;
+        OH_NativeWindow_DestroyNativeWindow(decoderWindow);
+        g_decoderOutputWindow = nullptr;
+        napi_create_int32(env, -1, &result);
+        return result;
+    }
+
+    // 6. 启动解码线程
+    g_decoderRunning.store(true);
+    g_decoderThread = std::thread(DecoderLoop);
+
+    LOGI("StartEncodeDecode success");
+    napi_create_int32(env, 0, &result);
+    return result;
+}
+
 struct CaptureSetting {
     int32_t quality;
     int32_t rotation;
@@ -232,30 +402,46 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value ReleaseCamera(napi_env env, napi_callback_info info)
-{
-    LOGE( "ReleaseCamera Start");
-    size_t requireArgc = 2;
-    size_t argc = 2;
-    napi_value args[2] = {nullptr};
-    napi_value result;
-    size_t typeLen = 0;
-    char* surfaceId = nullptr;
-
-    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-
+// ---------- 修改 ReleaseCamera：清理编解码器 ----------
+static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
+    LOGE("ReleaseCamera Start");
     ndkCamera_->ReleaseCamera();
     if (ndkCamera_) {
-        LOGE( "ndkCamera_ is not null");
         delete ndkCamera_;
         ndkCamera_ = nullptr;
     }
 
-    // 停止 OpenGL 管线，释放所有 GPU 资源
+    // ---- 新增：清理编解码器 ----
+    g_decoderRunning.store(false);
+    if (g_encodeQueue) {
+        g_encodeQueue->Stop();
+    }
+    if (g_decoderThread.joinable()) {
+        g_decoderThread.join();
+    }
+
+    if (g_videoEncoder) {
+        g_videoEncoder->Stop();
+        delete g_videoEncoder;
+        g_videoEncoder = nullptr;
+    }
+    if (g_videoDecoder) {
+        g_videoDecoder->Stop();
+        delete g_videoDecoder;
+        g_videoDecoder = nullptr;
+    }
+    g_encodeQueue.reset();
+
+    if (g_decoderOutputWindow) {
+        OH_NativeWindow_DestroyNativeWindow(g_decoderOutputWindow);
+        g_decoderOutputWindow = nullptr;
+    }
+
     OpenGLManager::GetInstance().Stop();
 
-    LOGE( "ReleaseCamera End");
-    napi_create_int32(env, argc, &result);
+    LOGE("ReleaseCamera End");
+    napi_value result;
+    napi_create_int32(env, 0, &result);
     return result;
 }
 static napi_value ReleaseSession(napi_env env, napi_callback_info info)
@@ -579,7 +765,8 @@ EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
-        {"initCamera", nullptr, InitCamera, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"initCamera", nullptr, InitCamera, nullptr, nullptr, nullptr, napi_default, nullptr},         
+        {"startEncodeDecode", nullptr, StartEncodeDecode, nullptr, nullptr, nullptr, napi_default, nullptr}, // 新增
         {"startPhotoOrVideo", nullptr, StartPhotoOrVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"videoOutputStart", nullptr, VideoOutputStart, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setZoomRatio", nullptr, SetZoomRatio, nullptr, nullptr, nullptr, napi_default, nullptr},
