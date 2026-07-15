@@ -15,13 +15,11 @@ add_library(entry SHARED
 main.cpp
 camera_manager.cpp
 opengl_manager.cpp
-  video_codec.cpp
-    gl/EGLHelper.cpp
-    gl/GLRenderer.cpp
-    gl/GLManager.cpp
-#    opengl/EGLHelper.cpp
-#    opengl/GLRenderer.cpp
-      opengl/OpenGLManager.cpp)
+video_codec.cpp
+opengl/EGLHelper.cpp
+opengl/GLRenderer.cpp
+opengl/OpenGLManager.cpp
+)
 #target_link_libraries(entry PUBLIC libohcamera.so libace_napi.z.so libnative_buffer.so libhilog_ndk.z.so librawfile.z.so)
 
 

@@ -18,15 +18,14 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
-#include <GLES2/gl2ext.h>
 
 #include <native_image/native_image.h>
 #include <native_window/external_window.h>
 #include <native_buffer/native_buffer.h>
 
 #include "util/DebugLog.h"
-#include "gl/EGLHelper.h"
-#include "gl/GLRenderer.h"
+#include "EGLHelper.h"
+#include "GLRenderer.h"
 
 /**
  * 渲染状态机

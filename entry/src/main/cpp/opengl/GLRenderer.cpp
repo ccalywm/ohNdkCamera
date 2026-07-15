@@ -1,225 +1,280 @@
 //
-// Created on 2026/7/13.
+// Created by Lixiaoyao on 2026/1/6.
 //
-// Node APIs are not fully supported. To solve the compilation error of the interface cannot be found,
-// please include "napi/native_api.h".
 
 #include "GLRenderer.h"
 #include "util/DebugLog.h"
-#include <cstring>
-#include <cmath>
+#include <cstdlib>
+#include <cstring> // for memset
 
-static const char* VERTEX_SHADER = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aTexCoord;
+// ======================= GLRenderer 实现 =======================
+
+// ======================= Shader 代码 =======================
+const char *V_SHADER = R"(
+attribute vec4 aPosition;
+attribute vec4 aTexCoord;
 uniform mat4 uTexMatrix;
-out vec2 vTexCoord;
+uniform float uRotation;
+uniform vec2 uScale;
+varying vec2 vTexCoord;
 void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
-    vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
-}
-)";
+    gl_Position = aPosition;
+    // 居中缩放/镜像逻辑
+    vec2 centered = (aTexCoord.xy - 0.5) * uScale;
+    // 旋转逻辑
+    float rad = radians(uRotation);
+    float c = cos(rad);
+    float s = sin(rad);
+    vec2 rotated = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
+    // 恢复坐标系并应用纹理矩阵
+    vTexCoord = (uTexMatrix * vec4(rotated + 0.5, 0.0, 1.0)).xy;
+})";
 
-static const char* FRAGMENT_SHADER = R"(#version 300 es
-#extension GL_OES_EGL_image_external_essl3 : require
+const char *F_SHADER = R"(
+#extension GL_OES_EGL_image_external : require
 precision mediump float;
-uniform samplerExternalOES uTexture;
-in vec2 vTexCoord;
-out vec4 fragColor;
+varying vec2 vTexCoord;
+uniform samplerExternalOES sTexture;
+uniform float uWarmFilter; uniform float uContrast; uniform float uSaturation;
+uniform float uGamma; uniform float uBrightness; uniform float uRed; uniform float uGreen; uniform float uBlue; uniform float uHue;
+
 void main() {
-    fragColor = texture(uTexture, vTexCoord);
+    vec4 color = texture2D(sTexture, vTexCoord);
+
+    // 1. 亮度
+    vec3 brightColor = color.rgb + uBrightness;
+
+    // 2. RGB通道
+    vec3 rgbColor = vec3(brightColor.r * uRed, brightColor.g * uGreen, brightColor.b * uBlue);
+
+    // 3. 暖色调 (简单的通道增益模拟)
+    float rB = 1.0 + 0.1 * uWarmFilter;
+    float gB = 1.0 + 0.05 * uWarmFilter;
+    float bB = 1.0 - 0.1 * uWarmFilter;
+    vec3 warmColor = vec3(rgbColor.r * rB, rgbColor.g * gB, rgbColor.b * bB);
+
+    // 4. 对比度
+    vec3 contrastColor = (warmColor - 0.5) * uContrast + 0.5;
+
+    // 5. 饱和度
+    float gray = dot(contrastColor, vec3(0.299, 0.587, 0.114));
+    vec3 satColor = mix(vec3(gray), contrastColor, uSaturation);
+
+    // 6. Gamma
+    vec3 gammaColor = pow(satColor, vec3(1.0/uGamma));
+
+    // 7. 色相 (简易版混合，非标准HSV旋转)
+    vec3 hueAdj = mix(gammaColor, vec3(gammaColor.g, gammaColor.b, gammaColor.r), uHue * 0.5);
+
+    gl_FragColor = vec4(clamp(hueAdj, 0.0, 1.0), color.a);
+})";
+
+// ======================= 实现 =======================
+GLRenderer::GLRenderer() {
+    // 安全初始化顶点数据，避免第一帧可能的随机值
+    memset(mVertexCoords, 0, sizeof(mVertexCoords));
+    // 默认填满屏幕
+    float defaultCoords[] = {-1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f};
+    memcpy(mVertexCoords, defaultCoords, sizeof(defaultCoords));
 }
-)";
-
-static const float QUAD_VERTICES[] = {
-    -1.0f, -1.0f, 0.0f, 1.0f,
-     1.0f, -1.0f, 1.0f, 1.0f,
-     1.0f,  1.0f, 1.0f, 0.0f,
-    -1.0f,  1.0f, 0.0f, 0.0f
-};
-static const uint16_t QUAD_INDICES[] = {0,1,2, 0,2,3};
-
-GLRenderer::GLRenderer()
-    : program_(0), vao_(0), vbo_(0), ebo_(0), oesTextureId_(0),
-      uTextureLoc_(-1), uTexMatrixLoc_(-1),
-      rotationDeg_(0), flipH_(false), flipV_(false) {}
 
 GLRenderer::~GLRenderer() {
     release();
 }
 
-bool GLRenderer::prepare(GLuint oesTextureId) {
-    oesTextureId_ = oesTextureId;
+void GLRenderer::prepare(GLuint textureId) {
+    mTextureId = textureId;
+    mProgram = createProgram(V_SHADER, F_SHADER);
 
-    if (!createShaderProgram()) {
-        LOGE("createShaderProgram failed");
-        return false;
+    if (mProgram == 0) {
+        LOGE("Failed to create program");
+        return;
     }
 
-    createFullscreenQuad();
-    return true;
+    mPositionHandle = glGetAttribLocation(mProgram, "aPosition");
+    mTexCoordHandle = glGetAttribLocation(mProgram, "aTexCoord");
+    mTexMatrixHandle = glGetUniformLocation(mProgram, "uTexMatrix");
+    mRotationHandle = glGetUniformLocation(mProgram, "uRotation");
+    mScaleHandle = glGetUniformLocation(mProgram, "uScale");
+
+    mFilterHandles.warm = glGetUniformLocation(mProgram, "uWarmFilter");
+    mFilterHandles.contrast = glGetUniformLocation(mProgram, "uContrast");
+    mFilterHandles.saturation = glGetUniformLocation(mProgram, "uSaturation");
+    mFilterHandles.gamma = glGetUniformLocation(mProgram, "uGamma");
+    mFilterHandles.brightness = glGetUniformLocation(mProgram, "uBrightness");
+    mFilterHandles.red = glGetUniformLocation(mProgram, "uRed");
+    mFilterHandles.green = glGetUniformLocation(mProgram, "uGreen");
+    mFilterHandles.blue = glGetUniformLocation(mProgram, "uBlue");
+    mFilterHandles.hue = glGetUniformLocation(mProgram, "uHue");
 }
 
-bool GLRenderer::createShaderProgram() {
-    auto compileShader = [](GLenum type, const char* src) -> GLuint {
-        GLuint shader = glCreateShader(type);
-        glShaderSource(shader, 1, &src, nullptr);
-        glCompileShader(shader);
-        GLint status;
-        glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-        if (status != GL_TRUE) {
-            GLchar log[512];
-            glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-            LOGE("Shader compile error: %s", log);
-            glDeleteShader(shader);
-            return 0;
-        }
-        return shader;
-    };
+void GLRenderer::draw(int viewWidth, int viewHeight, const float *textureMatrix) {
+    if (mProgram == 0) return; // 防止未初始化崩溃
 
-    GLuint vs = compileShader(GL_VERTEX_SHADER, VERTEX_SHADER);
-    GLuint fs = compileShader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
-    if (!vs || !fs) {
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
-        return false;
-    }
-
-    program_ = glCreateProgram();
-    glAttachShader(program_, vs);
-    glAttachShader(program_, fs);
-    glLinkProgram(program_);
-
-    GLint linked;
-    glGetProgramiv(program_, GL_LINK_STATUS, &linked);
-    if (linked != GL_TRUE) {
-        GLchar log[512];
-        glGetProgramInfoLog(program_, sizeof(log), nullptr, log);
-        LOGE("Program link error: %s", log);
-        glDeleteProgram(program_);
-        program_ = 0;
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        return false;
-    }
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-
-    uTextureLoc_ = glGetUniformLocation(program_, "uTexture");
-    uTexMatrixLoc_ = glGetUniformLocation(program_, "uTexMatrix");
-
-    return true;
-}
-
-void GLRenderer::createFullscreenQuad() {
-    glGenVertexArrays(1, &vao_);
-    glGenBuffers(1, &vbo_);
-    glGenBuffers(1, &ebo_);
-
-    glBindVertexArray(vao_);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(QUAD_VERTICES), QUAD_VERTICES, GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(QUAD_INDICES), QUAD_INDICES, GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
-}
-
-void GLRenderer::setTransform(int rotationDeg, bool flipH, bool flipV) {
-    rotationDeg_ = rotationDeg;
-    flipH_ = flipH;
-    flipV_ = flipV;
-    // LOGI("GLRenderer::setTransform: rotation=%d, flipH=%d, flipV=%d", rotationDeg, flipH, flipV);
-}
-static void multiplyMat4(const float a[16], const float b[16], float out[16]) {
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            out[i*4 + j] = 0.0f;
-            for (int k = 0; k < 4; k++) {
-                out[i*4 + j] += a[i*4 + k] * b[k*4 + j];
-            }
-        }
-    }
-}
-static void buildUserTransformMatrix(float angleDeg, bool flipH, bool flipV, float out[16]) {
-    // 初始化为单位矩阵
-    memset(out, 0, sizeof(float) * 16);
-    out[0] = out[5] = out[10] = out[15] = 1.0f;
-
-    // 无变换时直接返回
-    if (angleDeg == 0.0f && !flipH && !flipV) return;
-
-    float rad = angleDeg * 3.141592653589793f / 180.0f;
-    float c = cosf(rad);
-    float s = sinf(rad);
-    float sx = flipH ? -1.0f : 1.0f;
-    float sy = flipV ? -1.0f : 1.0f;
-
-    // 变换公式：先平移至中心 (-0.5, -0.5) -> 缩放/旋转 -> 再平移回 (+0.5, +0.5)
-    // 矩阵列主序：
-    //  m00 = sx*c,    m01 = -sy*s,    m03 = 0.5 - 0.5*sx*c + 0.5*sy*s
-    //  m10 = sx*s,    m11 = sy*c,     m13 = 0.5 - 0.5*sx*s - 0.5*sy*c
-    out[0] = sx * c;
-    out[4] = -sy * s;
-    out[12] = 0.5f - 0.5f * sx * c + 0.5f * sy * s;
-
-    out[1] = sx * s;
-    out[5] = sy * c;
-    out[13] = 0.5f - 0.5f * sx * s - 0.5f * sy * c;
-}
-void GLRenderer::draw(int width, int height, const float* texMatrix) {
-    if (program_ == 0 || oesTextureId_ == 0) return;
-
-    glUseProgram(program_);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTextureId_);
-    glUniform1i(uTextureLoc_, 0);
-
-    // 构建用户变换矩阵
-    float userMat[16];
-    buildUserTransformMatrix((float)rotationDeg_, flipH_, flipV_, userMat);
-
-    // // 打印调试信息
-    // LOGI("draw: rotationDeg_=%d, flipH=%d, flipV=%d", rotationDeg_, flipH_, flipV_);
-    // // 打印 userMat 前4个元素
-    // LOGI("userMat[0]=%f, userMat[4]=%f, userMat[12]=%f, userMat[1]=%f, userMat[5]=%f, userMat[13]=%f",
-    //      userMat[0], userMat[4], userMat[12], userMat[1], userMat[5], userMat[13]);
-
-    float finalMat[16];
-    // 组合矩阵 = texMatrix * userMat（先用户变换，再摄像头校正）
-    for (int i=0; i<4; ++i) {
-        for (int j=0; j<4; ++j) {
-            finalMat[i*4+j] = 0;
-            for (int k=0; k<4; ++k) {
-                finalMat[i*4+j] += texMatrix[i*4+k] * userMat[k*4+j];
-            }
-        }
-    }
-
-    glUniformMatrix4fv(uTexMatrixLoc_, 1, GL_FALSE, finalMat);
-
-    glViewport(0, 0, width, height);
-    glClearColor(0,0,0,1);
+    glViewport(0, 0, viewWidth, viewHeight);
+    glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    glBindVertexArray(vao_);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
-    glBindVertexArray(0);
+    glUseProgram(mProgram);
+    checkGlError("glUseProgram");
+
+    updateVertexScale(viewWidth, viewHeight);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, mTextureId);
+
+    // 启用顶点属性
+    glEnableVertexAttribArray(mPositionHandle);
+    glVertexAttribPointer(mPositionHandle, 2, GL_FLOAT, GL_FALSE, 0, mVertexCoords);
+
+    glEnableVertexAttribArray(mTexCoordHandle);
+    glVertexAttribPointer(mTexCoordHandle, 2, GL_FLOAT, GL_FALSE, 0, mTexCoords);
+
+    // 设置 Uniforms
+    glUniformMatrix4fv(mTexMatrixHandle, 1, GL_FALSE, textureMatrix);
+    glUniform1f(mRotationHandle, (float) mRotation);
+    glUniform2f(mScaleHandle, mMirrorH ? -1.0f : 1.0f, mMirrorV ? -1.0f : 1.0f);
+
+    glUniform1f(mFilterHandles.warm, mFilterValues.warm);
+    glUniform1f(mFilterHandles.contrast, mFilterValues.contrast);
+    glUniform1f(mFilterHandles.saturation, mFilterValues.saturation);
+    glUniform1f(mFilterHandles.gamma, mFilterValues.gamma);
+    glUniform1f(mFilterHandles.brightness, mFilterValues.brightness);
+    glUniform1f(mFilterHandles.red, mFilterValues.r);
+    glUniform1f(mFilterHandles.green, mFilterValues.g);
+    glUniform1f(mFilterHandles.blue, mFilterValues.b);
+    glUniform1f(mFilterHandles.hue, mFilterValues.hue);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    // 禁用属性 (好习惯，防止影响其他绘制)
+    glDisableVertexAttribArray(mPositionHandle);
+    glDisableVertexAttribArray(mTexCoordHandle);
+}
+
+void GLRenderer::updateVertexScale(int viewWidth, int viewHeight) {
+    // 关键修复：防止除以零崩溃
+    if (viewWidth <= 0 || viewHeight <= 0 || mVideoWidth <= 0 || mVideoHeight <= 0) return;
+
+    bool isVertical = (mRotation == 90 || mRotation == 270);
+    int vidW = isVertical ? mVideoWidth : mVideoHeight;
+    int vidH = isVertical ? mVideoHeight : mVideoWidth;
+
+    float viewRatio = (float) viewWidth / viewHeight;
+    float vidRatio = (float) vidW / vidH;
+    float sX = 1.0f, sY = 1.0f;
+
+    // Center Crop 算法
+    if (viewRatio > vidRatio) {
+        sX = vidRatio / viewRatio;
+    } else {
+        sY = viewRatio / vidRatio;
+    }
+
+    mVertexCoords[0] = -sX;
+    mVertexCoords[1] = -sY;
+    mVertexCoords[2] = sX;
+    mVertexCoords[3] = -sY;
+    mVertexCoords[4] = -sX;
+    mVertexCoords[5] = sY;
+    mVertexCoords[6] = sX;
+    mVertexCoords[7] = sY;
+}
+
+void GLRenderer::setTransform(int r, bool mh, bool mv) {
+    mRotation = r;
+    mMirrorH = mh;
+    mMirrorV = mv;
+}
+
+void GLRenderer::setVideoSize(int w, int h) {
+    mVideoWidth = w;
+    mVideoHeight = h;
+}
+
+void GLRenderer::setFilterParams(float w, float c, float s, float g, float b, float r, float gr,
+                                 float bl, float sh, float h) {
+    mFilterValues = {w, c, s, g, b, r, gr, bl, sh, h};
+}
+
+void GLRenderer::clearBuff() {
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
 }
 
 void GLRenderer::release() {
-    if (program_) glDeleteProgram(program_);
-    if (vao_) glDeleteVertexArrays(1, &vao_);
-    if (vbo_) glDeleteBuffers(1, &vbo_);
-    if (ebo_) glDeleteBuffers(1, &ebo_);
-    program_ = 0; vao_ = vbo_ = ebo_ = 0;
+    if (mProgram) {
+        glDeleteProgram(mProgram);
+        mProgram = 0;
+    }
+    // 注意：mTextureId 通常是外部管理的(OES)，这里不进行 glDeleteTextures，
+    // 除非确认纹理生命周期完全由 Renderer 控制。
+    mTextureId = 0;
+}
+
+// ======================= 关键：带错误检查的 Shader 加载 =======================
+
+GLuint GLRenderer::loadShader(GLenum type, const char *source) {
+    GLuint shader = glCreateShader(type);
+    if (shader == 0) return 0;
+
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    // 检查编译状态
+    GLint compiled;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (!compiled) {
+        GLint infoLen = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLen);
+        if (infoLen > 1) {
+            char *infoLog = (char *) malloc(sizeof(char) * infoLen);
+            glGetShaderInfoLog(shader, infoLen, nullptr, infoLog);
+            LOGE("Error compiling shader:\n%s", infoLog);
+            free(infoLog);
+        }
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+GLuint GLRenderer::createProgram(const char *v, const char *f) {
+    GLuint vs = loadShader(GL_VERTEX_SHADER, v);
+    GLuint fs = loadShader(GL_FRAGMENT_SHADER, f);
+    if (vs == 0 || fs == 0) return 0;
+
+    GLuint program = glCreateProgram();
+    if (program == 0) return 0;
+
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+
+    // 检查链接状态
+    GLint linked;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        GLint infoLen = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &infoLen);
+        if (infoLen > 1) {
+            char *infoLog = (char *) malloc(sizeof(char) * infoLen);
+            glGetProgramInfoLog(program, infoLen, nullptr, infoLog);
+            LOGE("Error linking program:\n%s", infoLog);
+            free(infoLog);
+        }
+        glDeleteProgram(program);
+        return 0;
+    }
+
+    // Shader 链接到 Program 后，可以删掉 Shader 对象了
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return program;
+}
+
+void GLRenderer::checkGlError(const char *op) {
+    for (GLint error = glGetError(); error; error = glGetError()) {
+        LOGE("after %s() glError (0x%x)\n", op, error);
+    }
 }
