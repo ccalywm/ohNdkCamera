@@ -8,6 +8,11 @@
 #include <native_buffer/native_buffer.h>   // 提供 BUFFER_USAGE_* 宏
 #include <native_window/external_window.h>
 #include <unistd.h>
+
+// int32_t renderWidth = 1920; 
+// int32_t renderHeight = 1080;
+int32_t renderWidth = 640; 
+int32_t renderHeight = 480;
 using namespace OHOS_CAMERA_SAMPLE;
 static NDKCamera *ndkCamera_ = nullptr;
 const int32_t ARGS_TWO = 2;
@@ -84,8 +89,6 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
     }
 
     auto& glManager = OpenGLManager::GetInstance();
-    int32_t renderWidth = 640;
-    int32_t renderHeight = 480;
 
     // 设置解码输出窗口尺寸
     OH_NativeWindow_NativeWindowHandleOpt(decoderWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
@@ -347,10 +350,9 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
         delete[] surfaceId;
         napi_create_int32(env, -1, &result);
         return result;
-    }
-
-    int32_t renderWidth = 640;
-    int32_t renderHeight = 480;
+    }     
+    LOGE("创建输出 NativeWindow , renderWidth=%d renderHeight=%d", renderWidth,renderHeight);
+    LOGE("创建输出 NativeWindow , renderWidth=%{public}d renderHeight=%{public}d", renderWidth, renderHeight);
     OH_NativeWindow_NativeWindowHandleOpt(outputWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
 
     // 3. 初始化 OpenGLManager

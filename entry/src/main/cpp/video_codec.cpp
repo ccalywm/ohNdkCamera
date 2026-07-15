@@ -2,6 +2,52 @@
 #include <chrono>
 #include <cstring>
 
+#include <cstdio>
+#include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static FILE* g_encoderDump = nullptr;
+static std::mutex g_dumpMutex;
+// 从 H.264 Annex B 码流中提取 SPS (nal_type=7) 和 PPS (nal_type=8) 数据
+// 返回拼接后的 std::vector<uint8_t>（包含起始码 00 00 00 01 + NAL）
+static std::vector<uint8_t> ExtractSPSPPSFromAnnexB(const uint8_t* data, size_t size) {
+    std::vector<uint8_t> result;
+    size_t pos = 0;
+    while (pos + 4 < size) {
+        // 查找起始码 (00 00 00 01 或 00 00 01)
+        size_t startCodeLen = 0;
+        if (pos + 4 <= size && data[pos] == 0 && data[pos+1] == 0 && data[pos+2] == 0 && data[pos+3] == 1) {
+            startCodeLen = 4;
+        } else if (pos + 3 <= size && data[pos] == 0 && data[pos+1] == 0 && data[pos+2] == 1) {
+            startCodeLen = 3;
+        } else {
+            pos++;
+            continue;
+        }
+        size_t start = pos + startCodeLen; // NAL 起始位置
+        if (start >= size) break;
+        uint8_t nalType = data[start] & 0x1F;
+        // 查找下一个起始码，确定当前 NAL 结束位置
+        size_t end = size;
+        for (size_t j = start + 1; j + 3 < size; ++j) {
+            if ((data[j] == 0 && data[j+1] == 0 && data[j+2] == 0 && data[j+3] == 1) ||
+                (data[j] == 0 && data[j+1] == 0 && data[j+2] == 1)) {
+                end = j;
+                break;
+            }
+        }
+        size_t nalLen = end - start;
+        if (nalType == 7 || nalType == 8) { // SPS 或 PPS
+            // 添加起始码
+            result.insert(result.end(), {0,0,0,1});
+            // 添加 NAL 数据
+            result.insert(result.end(), data + start, data + start + nalLen);
+        }
+        pos = end;
+    }
+    return result;
+}
 // ============================================================
 // EncodedDataQueue
 // ============================================================
@@ -44,15 +90,18 @@ bool VideoEncoder::Init(int32_t w, int32_t h, int32_t kbps, int32_t fps,
     OH_AVFormat* fmt = OH_AVFormat_Create();
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_WIDTH, w);
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_HEIGHT, h);
-    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
-    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
-    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_BITRATE, kbps * 1000);
+    
+    // 【关键修改】：Surface输入模式下，必须设置为 AV_PIXEL_FORMAT_SURFACE_FORMAT
+    // 设置为 NV12 会导致底层无法正确转换 OpenGL 写入的 RGBA 缓冲区，从而引发粉黄花屏
+    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_RGBA);
+    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+    
+    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_BITRATE, kbps * 1000);
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_FRAME_RATE, fps);
-    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_I_FRAME_INTERVAL, 1);
+    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_I_FRAME_INTERVAL, 1000);
     
-    // 【关键修改 2】：使用 SURFACE_FORMAT 时，强烈建议显式指定编码 Profile，防止底层协商失败
-    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PROFILE, AVC_PROFILE_BASELINE);
-    
+    OH_AVFormat_SetLongValue(fmt, OH_MD_KEY_BITRATE, 500000);
+    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, OH_BitrateMode::BITRATE_MODE_VBR);
     if (OH_VideoEncoder_Configure(encoder_, fmt) != AV_ERR_OK) {
         OH_AVFormat_Destroy(fmt); Cleanup(); return false;
     }
@@ -114,8 +163,8 @@ void VideoEncoder::OnNeedInputBuffer(OH_AVCodec*, uint32_t, OH_AVBuffer*, void*)
 // ============================================================
 // 编码器输出回调 — 关键：提取或构造 codec_config
 // ============================================================
-void VideoEncoder::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index,
-                                      OH_AVBuffer* buffer, void* userData) {
+void VideoEncoder::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index,     
+                                     OH_AVBuffer* buffer, void* userData) {
     auto* enc = static_cast<VideoEncoder*>(userData);
     if (!enc->running_.load()) return;
 
@@ -132,64 +181,73 @@ void VideoEncoder::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index,
     bool isConfig = (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0;
     int64_t pts = enc->ptsCounter_.fetch_add(33333);
 
-    LOGI("Enc out: sz=%d pts=%lld key=%d cfg=%d flags=0x%x [%02x %02x %02x %02x]",
+    LOGI("Enc out: sz=%d pts=%lld key=%d cfg=%d flags=0x%x [%02x %02x %02x %02x %02x]",
          attr.size, (long long)pts, isKey, isConfig, attr.flags,
-         data[0], data[1], data[2], data[3]);
+         data[0], data[1], data[2], data[3], data[4]);
 
-    // 第一个关键帧时，确保正确下发 codec_config
+    // 如果是关键帧且尚未发送 codec_config，提取 SPS/PPS
     if (isKey && !enc->hasSentCodecConfig_) {
         std::lock_guard<std::mutex> cl(enc->codecMutex_);
         if (enc->codecConfig_.empty()) {
-            // 1. 尝试从输出格式获取
+            // 1. 先尝试从输出格式获取（如果之前未获取到）
             OH_AVFormat* outFmt = OH_VideoEncoder_GetOutputDescription(codec);
             if (outFmt) {
                 uint8_t* cfg = nullptr;
                 size_t cfgSz = 0;
-                if (OH_AVFormat_GetBuffer(outFmt, OH_MD_KEY_CODEC_CONFIG, &cfg, &cfgSz) && cfg && cfgSz > 0) {
+                if (OH_AVFormat_GetBuffer(outFmt, "codec_config", &cfg, &cfgSz) && cfg && cfgSz > 0) {
                     enc->codecConfig_.assign(cfg, cfg + cfgSz);
                     LOGI("Got codec_config from format: %zu bytes", cfgSz);
                 }
                 OH_AVFormat_Destroy(outFmt);
             }
 
-            // 2. 如果格式中没有，则从 IDR 帧码流中提取 (寻找 0x65 IDR NALU 的位置)
+            // 2. 如果格式中没有，则从当前帧数据中提取 SPS/PPS
             if (enc->codecConfig_.empty()) {
-                size_t idrOffset = 0;
-                for (size_t i = 0; i + 4 < static_cast<size_t>(attr.size); ++i) {
-                    // 寻找起始码 00 00 00 01
-                    if (data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01) {
-                        uint8_t naluType = data[i+4] & 0x1F;
-                        if (naluType == 5) { // 5 表示 IDR 帧
-                            idrOffset = i;
-                            break;
-                        }
-                    }
-                }
-                
-                if (idrOffset > 0) {
-                    // IDR 前面的部分即为 SPS 和 PPS 序列
-                    enc->codecConfig_.assign(data, data + idrOffset);
-                    LOGI("Extracted codec_config from stream: %zu bytes", idrOffset);
+                enc->codecConfig_ = ExtractSPSPPSFromAnnexB(data, attr.size);
+                if (!enc->codecConfig_.empty()) {
+                    LOGI("Extracted SPS/PPS from keyframe: %zu bytes", enc->codecConfig_.size());
                 } else {
-                    LOGE("Failed to find SPS/PPS/IDR in keyframe!");
+                    LOGE("Failed to extract SPS/PPS from keyframe!");
                 }
             }
         }
 
-        // 推送独立的配置帧
+        // 如果成功获取到 codec_config，推送一个配置包
         if (!enc->codecConfig_.empty()) {
             auto cpkt = std::make_unique<EncodedDataQueue::Packet>();
             cpkt->data = enc->codecConfig_;
             cpkt->pts = 0;
             cpkt->isKeyFrame = false;
-            cpkt->isCodecConfig = true; // 标记为配置帧
+            cpkt->isCodecConfig = true;
             enc->outputQueue_->Push(std::move(cpkt));
-            LOGI(">>> Pushed codec_config: %zu bytes", cpkt->data.size());
+            LOGI("Pushed codec_config: %zu bytes", cpkt->data.size());
             enc->hasSentCodecConfig_ = true;
         }
     }
 
-    // 推送常规帧数据 (包含视频画面数据)
+    // ---------- 调试：保存编码数据到文件 ----------
+
+    // {
+    //     std::lock_guard<std::mutex> lock(g_dumpMutex);
+    //     if (!g_encoderDump) {
+    //         // 尝试打开文件（路径可改为应用缓存目录，例如 /data/data/com.your.app/cache/encoder.h264）
+    //         const char* path = "/data/storage/el2/base/haps/entry/cache/encoder1.h264";  // 需要 adb shell 权限
+    //         // 或者使用应用私有目录: /data/data/<package>/cache/encoder.h264
+    //         g_encoderDump = fopen(path, "wb");
+    //         if (g_encoderDump) {
+    //             LOGI("Opened file encoder dump file: %s", path);
+    //         } else {
+    //             LOGE("Opened file Failed to open dump file: %s", path);
+    //         }
+    //     }
+    //     if (g_encoderDump) {
+    //         fwrite(data, 1, attr.size, g_encoderDump);
+    //         fflush(g_encoderDump);
+    //         LOGI("Opened file %d bytes to encoder.h264", attr.size);
+    //     }
+    // }
+// ---------- 调试结束 ----------
+    // 推送常规视频帧
     auto pkt = std::make_unique<EncodedDataQueue::Packet>();
     pkt->data.assign(data, data + attr.size);
     pkt->pts = pts;
@@ -233,14 +291,31 @@ bool VideoDecoder::Init(OHNativeWindow* surf, const std::string& mime, int32_t w
     // 新增：明确指定解码器输出的像素格式 (NV12是鸿蒙AVC解码的通用格式)
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
     // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+    
+  
+    
 
+    // 在 VideoDecoder::Init 中，配置 format 之前：
+    std::vector<uint8_t> finalConfig;
+    if (!codecConfig.empty()) {
+        finalConfig = codecConfig;
+    } else {
+        // 硬编码 SPS/PPS (640x480 Baseline)
+        // static const uint8_t kSPS[] = {0x00,0x00,0x00,0x01,0x67,0x42,0x80,0x1e,0x8a,0x80,0x04,0x54,0xde,0x3c,0x80};
+        // static const uint8_t kPPS[] = {0x00,0x00,0x00,0x01,0x68,0x42,0x80};
+        // finalConfig.insert(finalConfig.end(), kSPS, kSPS+sizeof(kSPS));
+        // finalConfig.insert(finalConfig.end(), kPPS, kPPS+sizeof(kPPS));
+        // LOGI("Using hardcoded SPS/PPS, size=%zu", finalConfig.size());
+    }
+    
+    // 然后设置到 format:
     if (!codecConfig.empty()) {
         OH_AVFormat_SetBuffer(fmt, OH_MD_KEY_CODEC_CONFIG,
                               const_cast<uint8_t*>(codecConfig.data()),
                               static_cast<int32_t>(codecConfig.size()));
         LOGI("Decoder: set codec_config in configure: %zu bytes", codecConfig.size());
     }
-
+    
     if (OH_VideoDecoder_Configure(decoder_, fmt) != AV_ERR_OK) {
         LOGE("Decoder Configure failed");
         OH_AVFormat_Destroy(fmt);

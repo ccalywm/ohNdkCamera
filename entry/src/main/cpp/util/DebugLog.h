@@ -25,6 +25,7 @@
 
 #define LOGI(...)((void)OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, "OH_PJSIP_LOG", __VA_ARGS__))
 #define LOGD(...)((void)OH_LOG_Print(LOG_APP, LOG_DEBUG, LOG_DOMAIN, "OH_PJSIP_LOG", __VA_ARGS__))
+#define MYLOGD(...)((void)OH_LOG_Print(LOG_APP, LOG_DEBUG, LOG_DOMAIN, "OH_PJSIP_LOG", __VA_ARGS__))
 #define LOGW(...)((void)OH_LOG_Print(LOG_APP, LOG_WARN, LOG_DOMAIN, "OH_PJSIP_LOG", __VA_ARGS__))
 #define LOGE(...)((void)OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, "OH_PJSIP_LOG", __VA_ARGS__))
 

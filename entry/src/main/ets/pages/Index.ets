@@ -64,6 +64,13 @@ struct Index {
   private startEncoderIfReady() {
     if (this.cameraInitialized && this.decoderSurfaceId) {
       console.log("两个 XComponent 都已加载，启动编解码，解码ID:", this.decoderSurfaceId);
+      // 在 Ability 或 Page 中获取沙箱缓存路径
+      let context = getContext(this) as common.UIAbilityContext;
+      let cacheDir = context.cacheDir; // 例如返回的是沙箱映射路径
+      let filePath = cacheDir + "/encoder1.h264"
+
+      console.log("两个 XComponent 都已加载，启动编解码，path:",filePath);
+
       testNapi.startEncodeDecode(this.decoderSurfaceId);
     } else {
       console.log("编解码条件未满足，相机初始化:", this.cameraInitialized, "解码ID:", this.decoderSurfaceId);
@@ -83,7 +90,7 @@ struct Index {
             .onLoad(async () => {
               const id = this.xComponentController.getXComponentSurfaceId();
               this.surfaceId = id;
-              console.log("显示XComponent加载，surfaceID:", id);
+              console.log("初始化相机（同步调用，会阻塞直到完成）");
               // 初始化相机（同步调用，会阻塞直到完成）
               testNapi.initCamera(id, 2, 0);
               this.cameraInitialized = true;
