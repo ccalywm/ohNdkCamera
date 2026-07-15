@@ -96,12 +96,16 @@ bool VideoEncoder::Init(int32_t w, int32_t h, int32_t kbps, int32_t fps,
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_RGBA);
     // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
     
-    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_BITRATE, kbps * 1000);
+    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_BITRATE, kbps );
+    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_FRAME_RATE, fps);
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_FRAME_RATE, fps);
     OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_I_FRAME_INTERVAL, 1000);
     
-    OH_AVFormat_SetLongValue(fmt, OH_MD_KEY_BITRATE, 500000);
-    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, OH_BitrateMode::BITRATE_MODE_VBR);
+    // OH_AVFormat_SetLongValue(fmt, OH_MD_KEY_BITRATE, 500000);
+    // OH_AVFormat_SetLongValue(fmt, OH_MD_KEY_BITRATE, 790000);
+    // OH_AVFormat_SetLongValue(fmt, OH_MD_KEY_BITRATE, 2000000);
+    // OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, OH_BitrateMode::BITRATE_MODE_VBR);
+    OH_AVFormat_SetIntValue(fmt, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, OH_BitrateMode::BITRATE_MODE_CBR);
     if (OH_VideoEncoder_Configure(encoder_, fmt) != AV_ERR_OK) {
         OH_AVFormat_Destroy(fmt); Cleanup(); return false;
     }
