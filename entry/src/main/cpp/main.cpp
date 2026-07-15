@@ -11,8 +11,10 @@
 
 // int32_t renderWidth = 1920; 
 // int32_t renderHeight = 1080;
-int32_t renderWidth = 640; 
-int32_t renderHeight = 480;
+int32_t renderWidth = 1280; 
+int32_t renderHeight = 720;
+int32_t kbps = 6000000;
+int32_t fps = 30;
 using namespace OHOS_CAMERA_SAMPLE;
 static NDKCamera *ndkCamera_ = nullptr;
 const int32_t ARGS_TWO = 2;
@@ -106,7 +108,7 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
 
     // 2. 创建并启动编码器
     g_videoEncoder = new VideoEncoder();
-    if (!g_videoEncoder->Init(renderWidth, renderHeight, 4000000, 30, "video/avc")) {
+    if (!g_videoEncoder->Init(renderWidth, renderHeight, kbps, fps, "video/avc")) {
         LOGE("VideoEncoder Init failed");
         delete g_videoEncoder;
         g_videoEncoder = nullptr;
