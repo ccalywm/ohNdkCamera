@@ -14,7 +14,6 @@ include_directories(${NATIVERENDER_ROOT_PATH}
 add_library(entry SHARED
 main.cpp
 camera_manager.cpp
-opengl_manager.cpp
 video_codec.cpp
 opengl/EGLHelper.cpp
 opengl/GLRenderer.cpp
