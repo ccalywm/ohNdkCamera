@@ -25,8 +25,8 @@
 #include <native_buffer/native_buffer.h>
 
 #include "util/DebugLog.h"
-#include "gl/EGLHelper.h"
-#include "gl/GLRenderer.h"
+#include "EGLHelper.h"
+#include "GLRenderer.h"
 
 /**
  * 渲染状态机
