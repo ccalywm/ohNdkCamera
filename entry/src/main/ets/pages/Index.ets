@@ -67,7 +67,7 @@ struct Index {
       // 在 Ability 或 Page 中获取沙箱缓存路径
       let context = getContext(this) as common.UIAbilityContext;
       let cacheDir = context.cacheDir; // 例如返回的是沙箱映射路径
-      let filePath = cacheDir + "/encoder1.h264"
+      let filePath = cacheDir + "/encoder2.h264"
 
       console.log("两个 XComponent 都已加载，启动编解码，path:",filePath);
 
