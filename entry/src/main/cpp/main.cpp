@@ -1,17 +1,18 @@
 #include <js_native_api.h>
 #include "camera_manager.h"
-// #include "opengl_manager.h"
 #include "opengl/OpenGLManager.h"
-#include "video_codec.h"          // 新增：编解码器头文件
+#include "video/encoded_data_queue.h" // 新增：编解码器头文件
+#include "video/video_decoder.h"      // 新增：编解码器头文件
+#include "video/video_encoder.h"      // 新增：编解码器头文件
 #include "util/DebugLog.h"
 #include <multimedia/image_framework/image/pixelmap_native.h>
-#include <native_buffer/native_buffer.h>   // 提供 BUFFER_USAGE_* 宏
+#include <native_buffer/native_buffer.h> // 提供 BUFFER_USAGE_* 宏
 #include <native_window/external_window.h>
 #include <unistd.h>
 
 // int32_t renderWidth = 1920; 
 // int32_t renderHeight = 1080;
-int32_t renderWidth = 1280; 
+int32_t renderWidth = 1280;
 int32_t renderHeight = 720;
 int32_t kbps = 6000000;
 int32_t fps = 30;
@@ -20,12 +21,14 @@ static NDKCamera *ndkCamera_ = nullptr;
 const int32_t ARGS_TWO = 2;
 
 // ---------- 新增：编解码器全局变量 ----------
-static VideoEncoder* g_videoEncoder = nullptr;
-static VideoDecoder* g_videoDecoder = nullptr;
+static VideoEncoder *g_videoEncoder = nullptr;
+static VideoDecoder *g_videoDecoder = nullptr;
 static std::shared_ptr<EncodedDataQueue> g_encodeQueue = nullptr;
 static std::thread g_decoderThread;
 static std::atomic<bool> g_decoderRunning{false};
-static OHNativeWindow* g_decoderOutputWindow = nullptr;
+static OHNativeWindow *g_decoderOutputWindow = nullptr;
+static OpenGLManager *glManager = nullptr;
+
 
 // ---------- 新增：解码线程函数 ----------
 static void DecoderLoop() {
@@ -33,16 +36,16 @@ static void DecoderLoop() {
     int count = 0;
     while (g_decoderRunning.load()) {
         auto packet = g_encodeQueue->Pop(50);
-        if (!packet) continue;
-        if (!g_videoDecoder || !g_videoDecoder->IsRunning()) continue;
+        if (!packet)
+            continue;
+        if (!g_videoDecoder || !g_videoDecoder->IsRunning())
+            continue;
 
         count++;
-        LOGI("DL: #%d sz=%zu key=%d cfg=%d",
-             count, packet->data.size(), packet->isKeyFrame, packet->isCodecConfig);
+        LOGI("DL: #%d sz=%zu key=%d cfg=%d", count, packet->data.size(), packet->isKeyFrame, packet->isCodecConfig);
 
-        g_videoDecoder->QueuePacket(
-            packet->data.data(), packet->data.size(),
-            packet->pts, packet->isKeyFrame, packet->isCodecConfig);
+        g_videoDecoder->QueuePacket(packet->data.data(), packet->data.size(), packet->pts, packet->isKeyFrame,
+                                    packet->isCodecConfig);
     }
     LOGI("DecoderLoop exit, total=%d", count);
 }
@@ -67,11 +70,11 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
         napi_create_int32(env, -1, &result);
         return result;
     }
-    char* decoderSurfaceId = new char[typeLen + 1];
+    char *decoderSurfaceId = new char[typeLen + 1];
     napi_get_value_string_utf8(env, args[0], decoderSurfaceId, typeLen + 1, &typeLen);
 
     uint64_t surfId = std::stoull(decoderSurfaceId);
-    OHNativeWindow* decoderWindow = nullptr;
+    OHNativeWindow *decoderWindow = nullptr;
     int ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfId, &decoderWindow);
     delete[] decoderSurfaceId;
 
@@ -90,16 +93,18 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    auto& glManager = OpenGLManager::GetInstance();
+    if (glManager == nullptr) {
+        glManager = new OpenGLManager();
+    }
 
     // 设置解码输出窗口尺寸
     OH_NativeWindow_NativeWindowHandleOpt(decoderWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
 
     // 1. 清理旧编码器
     if (g_videoEncoder) {
-        OHNativeWindow* oldEncoderWindow = g_videoEncoder->GetInputSurface();
+        OHNativeWindow *oldEncoderWindow = g_videoEncoder->GetInputSurface();
         if (oldEncoderWindow) {
-            glManager.RemoveOutput(oldEncoderWindow);
+            glManager->RemoveOutput(oldEncoderWindow);
         }
         g_videoEncoder->Stop();
         delete g_videoEncoder;
@@ -126,7 +131,7 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
     }
 
     // 3. 将编码器输入 Surface 添加到 OpenGL 输出
-    OHNativeWindow* encoderWindow = g_videoEncoder->GetInputSurface();
+    OHNativeWindow *encoderWindow = g_videoEncoder->GetInputSurface();
     if (!encoderWindow) {
         LOGE("GetInputSurface failed");
         g_videoEncoder->Stop();
@@ -137,7 +142,7 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
         return result;
     }
     OH_NativeWindow_NativeWindowHandleOpt(encoderWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
-    glManager.AddOutput(encoderWindow, renderWidth, renderHeight);
+    glManager->AddOutput(encoderWindow, renderWidth, renderHeight);
 
     g_encodeQueue = g_videoEncoder->GetOutputQueue();
 
@@ -149,7 +154,7 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
     g_videoDecoder = new VideoDecoder();
     if (!g_videoDecoder->Init(decoderWindow, "video/avc", renderWidth, renderHeight)) {
         LOGE("VideoDecoder Init failed");
-        glManager.RemoveOutput(encoderWindow);
+        glManager->RemoveOutput(encoderWindow);
         g_videoEncoder->Stop();
         delete g_videoEncoder;
         g_videoEncoder = nullptr;
@@ -162,7 +167,7 @@ static napi_value StartEncodeDecode(napi_env env, napi_callback_info info) {
     }
     if (!g_videoDecoder->Start()) {
         LOGE("VideoDecoder Start failed");
-        glManager.RemoveOutput(encoderWindow);
+        glManager->RemoveOutput(encoderWindow);
         g_videoEncoder->Stop();
         delete g_videoEncoder;
         g_videoEncoder = nullptr;
@@ -193,8 +198,7 @@ struct CaptureSetting {
     int32_t altitude;
 };
 
-static napi_value SetZoomRatio(napi_env env, napi_callback_info info)
-{
+static napi_value SetZoomRatio(napi_env env, napi_callback_info info) {
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
@@ -208,16 +212,15 @@ static napi_value SetZoomRatio(napi_env env, napi_callback_info info)
     int32_t zoomRatio;
     napi_get_value_int32(env, args[0], &zoomRatio);
 
-    LOGE( "SetZoomRatio : %{public}d", zoomRatio);
+    LOGE("SetZoomRatio : %{public}d", zoomRatio);
 
     ndkCamera_->setZoomRatioFn(zoomRatio);
     napi_create_int32(env, argc, &result);
     return result;
 }
 
-static napi_value HasFlash(napi_env env, napi_callback_info info)
-{
-    LOGE( "HasFlash");
+static napi_value HasFlash(napi_env env, napi_callback_info info) {
+    LOGE("HasFlash");
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
@@ -231,16 +234,15 @@ static napi_value HasFlash(napi_env env, napi_callback_info info)
     int32_t flashMode;
     napi_get_value_int32(env, args[0], &flashMode);
 
-    LOGE( "HasFlash flashMode : %{public}d", flashMode);
+    LOGE("HasFlash flashMode : %{public}d", flashMode);
 
     ndkCamera_->HasFlashFn(flashMode);
     napi_create_int32(env, argc, &result);
     return result;
 }
 
-static napi_value IsVideoStabilizationModeSupported(napi_env env, napi_callback_info info)
-{
-    LOGE( "IsVideoStabilizationModeSupportedFn");
+static napi_value IsVideoStabilizationModeSupported(napi_env env, napi_callback_info info) {
+    LOGE("IsVideoStabilizationModeSupportedFn");
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
@@ -254,68 +256,14 @@ static napi_value IsVideoStabilizationModeSupported(napi_env env, napi_callback_
     int32_t videoMode;
     napi_get_value_int32(env, args[0], &videoMode);
 
-    LOGE( "IsVideoStabilizationModeSupportedFn videoMode : %{public}d", videoMode);
+    LOGE("IsVideoStabilizationModeSupportedFn videoMode : %{public}d", videoMode);
 
     ndkCamera_->IsVideoStabilizationModeSupportedFn(videoMode);
     napi_create_int32(env, argc, &result);
     return result;
 }
 
-// static napi_value InitCamera(napi_env env, napi_callback_info info)
-// {
-//     LOGE( "InitCamera Start");
-//     size_t requireArgc = 3;
-//     size_t argc = 3;
-//     napi_value args[3] = {nullptr};
-//     napi_value result;
-//     size_t typeLen = 0;
-//     char* surfaceId = nullptr;
-//
-//     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-//
-//     napi_get_value_string_utf8(env, args[0], nullptr, 0, &typeLen);
-//     surfaceId = new char[typeLen + 1];
-//     napi_get_value_string_utf8(env, args[0], surfaceId, typeLen + 1, &typeLen);
-//
-//     napi_valuetype valuetype1;
-//     napi_typeof(env, args[1], &valuetype1);
-//
-//     int32_t focusMode;
-//     napi_get_value_int32(env, args[1], &focusMode);
-//
-//     uint32_t cameraDeviceIndex;
-//     napi_get_value_uint32(env, args[ARGS_TWO], &cameraDeviceIndex);
-//
-//     LOGE( "InitCamera focusMode : %{public}d", focusMode);
-//     LOGE( "InitCamera surfaceId : %{public}s", surfaceId);
-//     LOGE( "InitCamera cameraDeviceIndex : %{public}d", cameraDeviceIndex);
-//
-//     if (ndkCamera_) {
-//         LOGE( "ndkCamera_ is not null");
-//         delete ndkCamera_;
-//         ndkCamera_ = nullptr;
-//     }
-//
-//     // 先启动 OpenGL 管线，将 XComponent 的 surfaceId 作为渲染目标
-//     // 默认分辨率 640x480，后续可通过 UpdateSize 动态调整
-//     int32_t renderWidth = 640;
-//     int32_t renderHeight = 480;
-//     bool glStarted = OpenGLManager::GetInstance().Start(std::string(surfaceId), renderWidth, renderHeight);
-//     if (!glStarted) {
-//         LOGE("OpenGLManager 启动失败");
-//     }
-//
-//     // NDKCamera 构造函数内部会从 OpenGLManager 获取输入 Surface ID
-//     // 摄像头数据将写入 OpenGLManager 创建的 Surface
-//     ndkCamera_ = new NDKCamera(surfaceId, focusMode, cameraDeviceIndex);
-//     LOGE( "InitCamera End");
-//     napi_create_int32(env, argc, &result);
-//     return result;
-// }
-
-
-static napi_value InitCamera(napi_env env, napi_callback_info info)
-{
+static napi_value InitCamera(napi_env env, napi_callback_info info) {
     LOGE("InitCamera Start");
     size_t argc = 3;
     napi_value args[3] = {nullptr};
@@ -325,7 +273,7 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
     // 1. 获取 surfaceId
     size_t typeLen = 0;
     napi_get_value_string_utf8(env, args[0], nullptr, 0, &typeLen);
-    char* surfaceId = new char[typeLen + 1];
+    char *surfaceId = new char[typeLen + 1];
     napi_get_value_string_utf8(env, args[0], surfaceId, typeLen + 1, &typeLen);
 
     int32_t focusMode;
@@ -345,21 +293,23 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
 
     // 2. 创建输出 NativeWindow（XComponent 的 Surface）
     uint64_t surfId = std::stoull(surfaceId);
-    OHNativeWindow* outputWindow = nullptr;
+    OHNativeWindow *outputWindow = nullptr;
     int ret = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfId, &outputWindow);
     if (ret != 0 || outputWindow == nullptr) {
         LOGE("创建输出 NativeWindow 失败, ret=%d", ret);
         delete[] surfaceId;
         napi_create_int32(env, -1, &result);
         return result;
-    }     
-    LOGE("创建输出 NativeWindow , renderWidth=%d renderHeight=%d", renderWidth,renderHeight);
+    }
+    LOGE("创建输出 NativeWindow , renderWidth=%d renderHeight=%d", renderWidth, renderHeight);
     LOGE("创建输出 NativeWindow , renderWidth=%{public}d renderHeight=%{public}d", renderWidth, renderHeight);
     OH_NativeWindow_NativeWindowHandleOpt(outputWindow, SET_BUFFER_GEOMETRY, renderWidth, renderHeight);
 
     // 3. 初始化 OpenGLManager
-    auto& glManager = OpenGLManager::GetInstance();
-    if (!glManager.Initialize(renderWidth, renderHeight)) {
+    if (glManager == nullptr) {
+        glManager = new OpenGLManager();
+    }
+    if (!glManager->Initialize(renderWidth, renderHeight)) {
         LOGE("OpenGLManager 初始化失败");
         OH_NativeWindow_DestroyNativeWindow(outputWindow);
         delete[] surfaceId;
@@ -367,9 +317,9 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
         return result;
     }
 
-    if (!glManager.Start()) {
+    if (!glManager->Start()) {
         LOGE("OpenGLManager 启动失败");
-        glManager.Stop();
+        glManager->Stop();
         OH_NativeWindow_DestroyNativeWindow(outputWindow);
         delete[] surfaceId;
         napi_create_int32(env, -1, &result);
@@ -377,13 +327,13 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
     }
 
     // 4. 添加输出目标（XComponent）
-    glManager.AddOutput(outputWindow, renderWidth, renderHeight);
+    glManager->AddOutput(outputWindow, renderWidth, renderHeight);
 
     // 5. 获取摄像头输入 Surface ID（OpenGLManager 内部已创建 NativeImage）
-    std::string inputSurfaceId = glManager.GetInputSurfaceId();
+    std::string inputSurfaceId = glManager->GetInputSurfaceId();
     if (inputSurfaceId.empty()) {
         LOGE("获取输入 Surface ID 失败");
-        glManager.Stop();
+        glManager->Stop();
         OH_NativeWindow_DestroyNativeWindow(outputWindow);
         delete[] surfaceId;
         napi_create_int32(env, -1, &result);
@@ -393,12 +343,12 @@ static napi_value InitCamera(napi_env env, napi_callback_info info)
     LOGE("摄像头输入 Surface ID: %s", inputSurfaceId.c_str());
 
     // 6. 创建 NDKCamera，传入输入 Surface ID
-    ndkCamera_ = new NDKCamera(inputSurfaceId.c_str(), focusMode, cameraDeviceIndex);
+    ndkCamera_ = new NDKCamera(inputSurfaceId.c_str(),focusMode, cameraDeviceIndex);
 
     // 7. 保存 outputWindow 以便后续释放（例如在 ReleaseCamera 中）
     // 建议将 outputWindow 保存到全局或类静态变量中，这里简单演示：
-    static OHNativeWindow* s_outputWindow = nullptr;
-    s_outputWindow = outputWindow;  // 注意：实际项目中应该用更安全的方式管理
+    static OHNativeWindow *s_outputWindow = nullptr;
+    s_outputWindow = outputWindow; // 注意：实际项目中应该用更安全的方式管理
 
     LOGE("InitCamera End");
     delete[] surfaceId;
@@ -441,33 +391,31 @@ static napi_value ReleaseCamera(napi_env env, napi_callback_info info) {
         g_decoderOutputWindow = nullptr;
     }
 
-    OpenGLManager::GetInstance().Stop();
+    glManager->Stop();
 
     LOGE("ReleaseCamera End");
     napi_value result;
     napi_create_int32(env, 0, &result);
     return result;
 }
-static napi_value ReleaseSession(napi_env env, napi_callback_info info)
-{
-    LOGE( "ReleaseCamera Start");
+static napi_value ReleaseSession(napi_env env, napi_callback_info info) {
+    LOGE("ReleaseCamera Start");
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
     napi_value result;
     size_t typeLen = 0;
-    char* surfaceId = nullptr;
+    char *surfaceId = nullptr;
 
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
     ndkCamera_->ReleaseSession();
 
-    LOGE( "ReleaseCamera End");
+    LOGE("ReleaseCamera End");
     napi_create_int32(env, argc, &result);
     return result;
 }
-static napi_value StartPhotoOrVideo(napi_env env, napi_callback_info info)
-{
+static napi_value StartPhotoOrVideo(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "StartPhotoOrVideo Start");
     Camera_ErrorCode ret = CAMERA_OK;
     size_t requireArgc = 3;
@@ -477,9 +425,9 @@ static napi_value StartPhotoOrVideo(napi_env env, napi_callback_info info)
     size_t typeLen = 0;
     size_t videoIdLen = 0;
     size_t photoIdLen = 0;
-    char* modeFlag = nullptr;
-    char* videoId = nullptr;
-    char* photoId = nullptr;
+    char *modeFlag = nullptr;
+    char *videoId = nullptr;
+    char *photoId = nullptr;
 
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
@@ -496,18 +444,17 @@ static napi_value StartPhotoOrVideo(napi_env env, napi_callback_info info)
     napi_get_value_string_utf8(env, args[ARGS_TWO], photoId, photoIdLen + 1, &photoIdLen);
 
     if (!strcmp(modeFlag, "photo")) {
-        LOGE( "StartPhoto surfaceId %{public}s", photoId);
+        LOGE("StartPhoto surfaceId %{public}s", photoId);
         ret = ndkCamera_->StartPhoto(photoId);
     } else if (!strcmp(modeFlag, "video")) {
         ret = ndkCamera_->StartVideo(videoId, photoId);
-        LOGE( "StartPhotoOrVideo %{public}s, %{public}s", videoId, photoId);
+        LOGE("StartPhotoOrVideo %{public}s, %{public}s", videoId, photoId);
     }
     napi_create_int32(env, ret, &result);
     return result;
 }
 
-static napi_value VideoOutputStart(napi_env env, napi_callback_info info)
-{
+static napi_value VideoOutputStart(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "VideoOutputStart Start");
     napi_value result;
     Camera_ErrorCode ret = ndkCamera_->VideoOutputStart();
@@ -515,8 +462,7 @@ static napi_value VideoOutputStart(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value IsExposureModeSupported(napi_env env, napi_callback_info info)
-{
+static napi_value IsExposureModeSupported(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "IsExposureModeSupported exposureMode start.");
     size_t requireArgc = 2;
     size_t argc = 2;
@@ -531,7 +477,7 @@ static napi_value IsExposureModeSupported(napi_env env, napi_callback_info info)
     int32_t exposureMode;
     napi_get_value_int32(env, args[0], &exposureMode);
 
-    LOGE( "IsExposureModeSupported exposureMode : %{public}d", exposureMode);
+    LOGE("IsExposureModeSupported exposureMode : %{public}d", exposureMode);
 
     ndkCamera_->IsExposureModeSupportedFn(exposureMode);
     OH_LOG_INFO(LOG_APP, "IsExposureModeSupported exposureMode end.");
@@ -539,8 +485,7 @@ static napi_value IsExposureModeSupported(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value IsMeteringPoint(napi_env env, napi_callback_info info)
-{
+static napi_value IsMeteringPoint(napi_env env, napi_callback_info info) {
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
@@ -562,8 +507,7 @@ static napi_value IsMeteringPoint(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value IsExposureBiasRange(napi_env env, napi_callback_info info)
-{
+static napi_value IsExposureBiasRange(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "IsExposureBiasRange start.");
     size_t requireArgc = 2;
     size_t argc = 2;
@@ -583,8 +527,7 @@ static napi_value IsExposureBiasRange(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value IsFocusModeSupported(napi_env env, napi_callback_info info)
-{
+static napi_value IsFocusModeSupported(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "IsFocusModeSupported start.");
     size_t requireArgc = 2;
     size_t argc = 2;
@@ -599,7 +542,7 @@ static napi_value IsFocusModeSupported(napi_env env, napi_callback_info info)
     int32_t focusMode;
     napi_get_value_int32(env, args[0], &focusMode);
 
-    LOGE( "IsFocusModeSupportedFn videoMode : %{public}d", focusMode);
+    LOGE("IsFocusModeSupportedFn videoMode : %{public}d", focusMode);
 
     ndkCamera_->IsFocusModeSupported(focusMode);
     OH_LOG_INFO(LOG_APP, "IsFocusModeSupported end.");
@@ -607,8 +550,7 @@ static napi_value IsFocusModeSupported(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value IsFocusPoint(napi_env env, napi_callback_info info)
-{
+static napi_value IsFocusPoint(napi_env env, napi_callback_info info) {
     size_t requireArgc = 2;
     size_t argc = 2;
     napi_value args[2] = {nullptr};
@@ -633,9 +575,8 @@ static napi_value IsFocusPoint(napi_env env, napi_callback_info info)
     return result;
 }
 
-static napi_value GetVideoFrameWidth(napi_env env, napi_callback_info info)
-{
-    LOGE( "GetVideoFrameWidth Start");
+static napi_value GetVideoFrameWidth(napi_env env, napi_callback_info info) {
+    LOGE("GetVideoFrameWidth Start");
     size_t argc = 1;
     napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -643,13 +584,12 @@ static napi_value GetVideoFrameWidth(napi_env env, napi_callback_info info)
     napi_value result = nullptr;
     napi_create_int32(env, ndkCamera_->GetVideoFrameWidth(), &result);
 
-    LOGE( "GetVideoFrameWidth End");
+    LOGE("GetVideoFrameWidth End");
     return result;
 }
 
-static napi_value GetVideoFrameHeight(napi_env env, napi_callback_info info)
-{
-    LOGE( "GetVideoFrameHeight Start");
+static napi_value GetVideoFrameHeight(napi_env env, napi_callback_info info) {
+    LOGE("GetVideoFrameHeight Start");
     size_t argc = 1;
     napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -657,13 +597,12 @@ static napi_value GetVideoFrameHeight(napi_env env, napi_callback_info info)
     napi_value result = nullptr;
     napi_create_int32(env, ndkCamera_->GetVideoFrameHeight(), &result);
 
-    LOGE( "GetVideoFrameHeight End");
+    LOGE("GetVideoFrameHeight End");
     return result;
 }
 
-static napi_value GetVideoFrameRate(napi_env env, napi_callback_info info)
-{
-    LOGE( "GetVideoFrameRate Start");
+static napi_value GetVideoFrameRate(napi_env env, napi_callback_info info) {
+    LOGE("GetVideoFrameRate Start");
     size_t argc = 1;
     napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -671,13 +610,12 @@ static napi_value GetVideoFrameRate(napi_env env, napi_callback_info info)
     napi_value result = nullptr;
     napi_create_int32(env, ndkCamera_->GetVideoFrameRate(), &result);
 
-    LOGE( "GetVideoFrameRate End");
+    LOGE("GetVideoFrameRate End");
     return result;
 }
 
-static napi_value VideoOutputStopAndRelease(napi_env env, napi_callback_info info)
-{
-    LOGE( "VideoOutputStopAndRelease Start");
+static napi_value VideoOutputStopAndRelease(napi_env env, napi_callback_info info) {
+    LOGE("VideoOutputStopAndRelease Start");
     size_t argc = 1;
     napi_value args[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -686,23 +624,21 @@ static napi_value VideoOutputStopAndRelease(napi_env env, napi_callback_info inf
     ndkCamera_->VideoOutputStop();
     ndkCamera_->VideoOutputRelease();
 
-    LOGE( "VideoOutputStopAndRelease End");
+    LOGE("VideoOutputStopAndRelease End");
     napi_create_int32(env, argc, &result);
     return result;
 }
 
-static napi_value TakePicture(napi_env env, napi_callback_info info)
-{
+static napi_value TakePicture(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "TakePicture Start");
     napi_value result;
     Camera_ErrorCode ret = ndkCamera_->TakePicture();
-    LOGE( "TakePicture result is %{public}d", ret);
+    LOGE("TakePicture result is %{public}d", ret);
     napi_create_int32(env, ret, &result);
     return result;
 }
 
-static napi_value GetCaptureParam(napi_env env, napi_value captureConfigValue, CaptureSetting *config)
-{
+static napi_value GetCaptureParam(napi_env env, napi_value captureConfigValue, CaptureSetting *config) {
     napi_value value = nullptr;
     napi_get_named_property(env, captureConfigValue, "quality", &value);
     napi_get_value_int32(env, value, &config->quality);
@@ -729,8 +665,7 @@ static napi_value GetCaptureParam(napi_env env, napi_value captureConfigValue, C
                 config->altitude);
     return 0;
 }
-static void SetConfig(CaptureSetting settings, Camera_PhotoCaptureSetting *photoSetting, Camera_Location *location)
-{
+static void SetConfig(CaptureSetting settings, Camera_PhotoCaptureSetting *photoSetting, Camera_Location *location) {
     if (photoSetting == nullptr || location == nullptr) {
         OH_LOG_INFO(LOG_APP, "photoSetting is null");
     }
@@ -743,8 +678,7 @@ static void SetConfig(CaptureSetting settings, Camera_PhotoCaptureSetting *photo
     photoSetting->location = location;
 }
 
-static napi_value TakePictureWithSettings(napi_env env, napi_callback_info info)
-{
+static napi_value TakePictureWithSettings(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "TakePictureWithSettings Start");
     size_t requireArgc = 1;
     size_t argc = 1;
@@ -759,17 +693,16 @@ static napi_value TakePictureWithSettings(napi_env env, napi_callback_info info)
 
     napi_value result;
     Camera_ErrorCode ret = ndkCamera_->TakePictureWithPhotoSettings(photoSetting);
-    LOGE( "TakePictureWithSettings result is %{public}d", ret);
+    LOGE("TakePictureWithSettings result is %{public}d", ret);
     napi_create_int32(env, ret, &result);
     return result;
 }
 
 static napi_value NAPI_Global_isFocusModeSupported(napi_env env, napi_callback_info info) {}
 EXTERN_C_START
-static napi_value Init(napi_env env, napi_value exports)
-{
+static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
-        {"initCamera", nullptr, InitCamera, nullptr, nullptr, nullptr, napi_default, nullptr},         
+        {"initCamera", nullptr, InitCamera, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startEncodeDecode", nullptr, StartEncodeDecode, nullptr, nullptr, nullptr, napi_default, nullptr}, // 新增
         {"startPhotoOrVideo", nullptr, StartPhotoOrVideo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"videoOutputStart", nullptr, VideoOutputStart, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -808,7 +741,4 @@ static napi_module demoModule = {
     .reserved = {0},
 };
 
-extern "C" __attribute__((constructor)) void RegisterEntryModule(void)
-{
-    napi_module_register(&demoModule);
-}
+extern "C" __attribute__((constructor)) void RegisterEntryModule(void) { napi_module_register(&demoModule); }
